@@ -10,6 +10,24 @@ const FILE = path.join(app.getPath('userData'), 'cue-data.json');
 // should live in a real prompt file, not in a settings field.
 const MAX_AI_RULES_CHARS = 2000;
 
+// Bounds for the code font size. Below the minimum it is unreadable on a
+// translucent panel; above the maximum a solution no longer fits on screen.
+const MIN_CODE_FONT_SIZE = 11;
+const MAX_CODE_FONT_SIZE = 22;
+
+function clampCodeFontSize(value, fallback = DEFAULTS.codeFontSize) {
+  const size = Math.round(Number(value));
+  if (!Number.isFinite(size)) return fallback;
+  return Math.min(MAX_CODE_FONT_SIZE, Math.max(MIN_CODE_FONT_SIZE, size));
+}
+
+// Window geometry arrives from the renderer and from a JSON file on disk, so a
+// non-numeric value has to degrade to "unset" rather than reach BrowserWindow.
+function normalizeDimension(value) {
+  const number = Math.round(Number(value));
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
 const DEFAULTS = {
   provider: 'openai',
   sttProvider: 'auto',
@@ -39,9 +57,16 @@ const DEFAULTS = {
   // points", "casual tone". Applied to every LLM mode EXCEPT LeetCode (kept
   // strict for coding problems).
   aiRules: '',
-  // Window position
+  // Window position and size. Size is persisted too: reading a solution off a
+  // 700x600 panel means resizing it every single session otherwise.
   windowX: null,
   windowY: null,
+  windowW: null,
+  windowH: null,
+  // Font size of code blocks in the answer pane. Reading a solution off a
+  // translucent overlay is not the same as reading it in an editor, so this
+  // is adjustable from the composer.
+  codeFontSize: 13,
   models: {
     openai: { fast: 'gpt-4o-mini', smart: 'gpt-4o' },
     anthropic: { fast: 'claude-3-5-haiku-latest', smart: 'claude-3-5-sonnet-latest' },
@@ -75,11 +100,27 @@ function deepMerge(base, over) {
   return out;
 }
 
+// Applied on read as well as on write: a settings file written by an older
+// build, or hand-edited, must not be able to hand a bad geometry or font size
+// to BrowserWindow and the renderer.
+function normalize(settings) {
+  settings.baseUrl = normalizeBaseUrl(settings.baseUrl);
+  settings.codeFontSize = clampCodeFontSize(settings.codeFontSize);
+  settings.windowX = Number.isFinite(Number(settings.windowX)) ? Math.round(Number(settings.windowX)) : null;
+  settings.windowY = Number.isFinite(Number(settings.windowY)) ? Math.round(Number(settings.windowY)) : null;
+  settings.windowW = normalizeDimension(settings.windowW);
+  settings.windowH = normalizeDimension(settings.windowH);
+  return settings;
+}
+
 function load() {
   if (data) return data;
   try { data = deepMerge(DEFAULTS, JSON.parse(fs.readFileSync(FILE, 'utf8'))); }
   catch { data = deepMerge(DEFAULTS, {}); }
 
+  // A bad baseUrl on disk must not throw on every read — drop it instead.
+  try { data = normalize(data); }
+  catch { data.baseUrl = ''; data = normalize(data); }
 
   return data;
 }
@@ -87,12 +128,16 @@ function save() { try { fs.writeFileSync(FILE, JSON.stringify(data, null, 2)); }
 
 module.exports = {
   MAX_AI_RULES_CHARS,
+  MIN_CODE_FONT_SIZE,
+  MAX_CODE_FONT_SIZE,
+  clampCodeFontSize,
   getSettings() { return load(); },
   setSettings(patch) {
     load();
     const nextSettings = deepMerge(data, patch || {});
-    nextSettings.baseUrl = normalizeBaseUrl(nextSettings.baseUrl);
-    data = nextSettings;
+    // normalizeBaseUrl still throws here on purpose: a user typing a bad Base
+    // URL in Settings should see the error, unlike a stale value read off disk.
+    data = normalize(nextSettings);
     save();
     return data;
   }

@@ -134,6 +134,9 @@ const MODES = {
     userBubble: null,
     small: false,
     resumeMode: 'ask',
+    // Adopts whichever scope is already open, so a typed "now make it O(n)"
+    // after a screenshot solve is a follow-up to that solve, not a new topic.
+    memoryScope: 'any',
     buildSystem(contextBlock, aiRules) {
       return applyRules(buildSystem(
         'You are cue, a real-time copilot with access to the candidate\'s screen and live interview. ' +
@@ -184,6 +187,13 @@ const MODES = {
     userBubble: 'Solve what\'s on screen',
     small: false,
     resumeMode: 'leetcode',
+    // Its own memory scope: a coding answer must not be coloured by interview
+    // history, and interview modes must not inherit the code. See conversation.js.
+    memoryScope: 'coding',
+    // A restatement, an approach, a full solution and a complexity analysis do
+    // not fit in the 700-token default — the code was being cut off mid-block,
+    // which is the worst possible failure in the middle of a live exercise.
+    maxTokens: { fast: 2500, smart: 3000 },
     buildSystem(_contextBlock, _aiRules) {
       // Context block AND aiRules intentionally ignored — code answers must
       // stay strict regardless of personal style or context.
@@ -192,6 +202,32 @@ const MODES = {
         '(use the language shown on screen, else Python), (4) time and space complexity. Keep prose tight.';
     },
     build() { return 'Solve the coding problem shown in the screenshot.'; }
+  },
+
+  // ── Continue: pick up an answer that hit the token ceiling ────────────────
+  // Offered by the UI only when the provider reported it stopped on length.
+  // No screenshot: the previous answer is already in the conversation memory,
+  // and re-capturing would only add latency to something the user is waiting on.
+  continue: {
+    needsScreen: false,
+    userBubble: 'Continue',
+    small: false,
+    resumeMode: 'ask',
+    memoryScope: 'any',
+    // Reuses the system prompt of whatever mode produced the cut-off answer,
+    // so a continued LeetCode solution stays under the LeetCode rules.
+    inheritSystemFromLastMode: true,
+    maxTokens: { fast: 2500, smart: 3000 },
+    buildSystem(_contextBlock, _aiRules) {
+      // Fallback only — used if nothing was answered earlier this session.
+      return 'You are cue. Continue the previous answer exactly where it stopped.';
+    },
+    build() {
+      return 'Your previous answer was cut off because it hit the length limit. ' +
+        'Continue from exactly where it stopped. Do not repeat any text you already wrote, ' +
+        'do not restate the problem, and do not start the code block over — if the code was ' +
+        'interrupted, resume inside a fenced code block at the exact line it broke off.';
+    }
   }
 };
 

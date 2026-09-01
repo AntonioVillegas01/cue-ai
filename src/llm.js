@@ -88,6 +88,21 @@ function formatProviderErrorMessage(error, provider, model) {
   return rawMessage || 'Unknown LLM error.';
 }
 
+// Hard ceiling on a per-mode override, so a bad settings value can't turn one
+// request into an unbounded bill.
+const MAX_TOKENS_CEILING = 8000;
+
+/**
+ * Pick the token budget for one request. Modes that need room for a full
+ * program (LeetCode) ask for more than the conversational default; anything
+ * missing, non-numeric or out of range falls back to the tier default.
+ */
+function resolveMaxTokens(requested, fallback) {
+  const value = Number(requested);
+  if (!Number.isFinite(value) || value <= 0) return fallback;
+  return Math.min(Math.floor(value), MAX_TOKENS_CEILING);
+}
+
 function sanitizeTurns(turns) {
   const valid = new Set(['user', 'assistant']);
   return (turns || []).filter(t => valid.has(t.role)).map(t => ({ role: t.role, text: String(t.text || '') }));
@@ -105,7 +120,7 @@ function stripDataUrl(dataUrl) {
   return m ? { mime: m[1], b64: m[2] } : null;
 }
 
-async function streamOpenAI({ apiKey, baseURL, model, system, turns, imageDataUrl, maxTokens, onToken }) {
+async function streamOpenAI({ apiKey, baseURL, model, system, turns, imageDataUrl, maxTokens, onToken, onTruncated = () => {} }) {
   const OpenAI = require('openai');
   const client = new OpenAI(baseURL ? { apiKey, baseURL } : { apiKey });
   const messages = [{ role: 'system', content: system }];
@@ -124,10 +139,14 @@ async function streamOpenAI({ apiKey, baseURL, model, system, turns, imageDataUr
   });
   const stream = await client.chat.completions.create({ model, messages, stream: true, max_tokens: maxTokens });
   let full = '';
+  let truncated = false;
   for await (const part of stream) {
-    const d = part.choices && part.choices[0] && part.choices[0].delta && part.choices[0].delta.content;
+    const choice = part.choices && part.choices[0];
+    const d = choice && choice.delta && choice.delta.content;
     if (d) { full += d; onToken(d); }
+    if (choice && choice.finish_reason === 'length') truncated = true;
   }
+  if (truncated) onTruncated();
   return full;
 }
 
@@ -142,7 +161,7 @@ function normalizeAzureBaseURL(raw) {
   return u;
 }
 
-async function streamAzure({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken, endpoint }) {
+async function streamAzure({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken, endpoint, onTruncated = () => {} }) {
   const url = normalizeAzureBaseURL(endpoint);
   if (!url) throw new Error('Missing Azure endpoint. Add your Azure AI Foundry or Azure OpenAI endpoint in Settings.');
   const messages = [{ role: 'system', content: system }];
@@ -174,14 +193,18 @@ async function streamAzure({ apiKey, model, system, turns, imageDataUrl, maxToke
   }
   const stream = await client.chat.completions.create({ model, messages, stream: true, max_completion_tokens: maxTokens });
   let full = '';
+  let truncated = false;
   for await (const part of stream) {
-    const d = part.choices && part.choices[0] && part.choices[0].delta && part.choices[0].delta.content;
+    const choice = part.choices && part.choices[0];
+    const d = choice && choice.delta && choice.delta.content;
     if (d) { full += d; onToken(d); }
+    if (choice && choice.finish_reason === 'length') truncated = true;
   }
+  if (truncated) onTruncated();
   return full;
 }
 
-async function streamAnthropic({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken }) {
+async function streamAnthropic({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken, onTruncated = () => {} }) {
   const Anthropic = require('@anthropic-ai/sdk');
   const client = new Anthropic({ apiKey });
   const messages = turns.map((t, i) => {
@@ -197,13 +220,16 @@ async function streamAnthropic({ apiKey, model, system, turns, imageDataUrl, max
   });
   const stream = await client.messages.create({ model, max_tokens: maxTokens, system, messages, stream: true });
   let full = '';
+  let truncated = false;
   for await (const ev of stream) {
     if (ev.type === 'content_block_delta' && ev.delta && ev.delta.type === 'text_delta') { full += ev.delta.text; onToken(ev.delta.text); }
+    if (ev.type === 'message_delta' && ev.delta && ev.delta.stop_reason === 'max_tokens') truncated = true;
   }
+  if (truncated) onTruncated();
   return full;
 }
 
-async function streamGemini({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken }) {
+async function streamGemini({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken, onTruncated = () => {} }) {
   const { GoogleGenAI } = require('@google/genai');
   const ai = new GoogleGenAI({ apiKey });
   const contents = turns.map((t, i) => {
@@ -219,14 +245,18 @@ async function streamGemini({ apiKey, model, system, turns, imageDataUrl, maxTok
     model, contents, config: { systemInstruction: system, maxOutputTokens: maxTokens }
   });
   let full = '';
+  let truncated = false;
   for await (const chunk of stream) {
     const t = chunk && chunk.text;
     if (t) { full += t; onToken(t); }
+    const finishReason = chunk && chunk.candidates && chunk.candidates[0] && chunk.candidates[0].finishReason;
+    if (finishReason === 'MAX_TOKENS') truncated = true;
   }
+  if (truncated) onTruncated();
   return full;
 }
 
-async function streamOllama({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken }) {
+async function streamOllama({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken, onTruncated = () => {} }) {
   const baseUrl = apiKey || 'http://localhost:11434';
   const url = `${baseUrl.replace(/\/$/, '')}/api/chat`;
 
@@ -263,6 +293,16 @@ async function streamOllama({ apiKey, model, system, turns, imageDataUrl, maxTok
   const decoder = new TextDecoder();
   let full = '';
   let buffer = '';
+  let truncated = false;
+  // Note: no `num_predict` is sent, so Ollama runs to its own limit as it
+  // always has. This only reports the case where it stops on one.
+  const consume = (data) => {
+    if (data.message && data.message.content) {
+      full += data.message.content;
+      onToken(data.message.content);
+    }
+    if (data.done_reason === 'length') truncated = true;
+  };
   for await (const chunk of response.body) {
     buffer += decoder.decode(chunk, { stream: true });
     const lines = buffer.split('\n');
@@ -270,25 +310,16 @@ async function streamOllama({ apiKey, model, system, turns, imageDataUrl, maxTok
     for (const line of lines) {
       if (!line.trim()) continue;
       try {
-        const data = JSON.parse(line);
-        if (data.message && data.message.content) {
-          full += data.message.content;
-          onToken(data.message.content);
-        }
+        consume(JSON.parse(line));
       } catch (e) {
         // ignore
       }
     }
   }
   if (buffer.trim()) {
-    try {
-      const data = JSON.parse(buffer);
-      if (data.message && data.message.content) {
-        full += data.message.content;
-        onToken(data.message.content);
-      }
-    } catch (e) { }
+    try { consume(JSON.parse(buffer)); } catch (e) { }
   }
+  if (truncated) onTruncated();
   return full;
 }
 
@@ -338,7 +369,14 @@ function createLLM(settings) {
     configurationError,
     async stream(params) {
       if (!ready) throw new Error(configurationError || `Complete the ${provider} provider settings.`);
-      const args = { apiKey, baseURL, endpoint, model, maxTokens, ...params, turns: sanitizeTurns(params.turns) };
+      const args = {
+        apiKey, baseURL, endpoint, model,
+        ...params,
+        // A mode may ask for a bigger budget than the tier default; anything
+        // unusable falls back rather than being passed through to the provider.
+        maxTokens: resolveMaxTokens(params && params.maxTokens, maxTokens),
+        turns: sanitizeTurns(params.turns)
+      };
       try {
         if (provider === 'openai') return await streamOpenAI(args);
         if (provider === CUSTOM_PROVIDER) return await streamOpenAI(args);
@@ -356,4 +394,11 @@ function createLLM(settings) {
   };
 }
 
-module.exports = { createLLM, formatProviderErrorMessage, isQuotaError, CURRENT_GEMINI_DEFAULT };
+module.exports = {
+  createLLM,
+  formatProviderErrorMessage,
+  isQuotaError,
+  resolveMaxTokens,
+  MAX_TOKENS_CEILING,
+  CURRENT_GEMINI_DEFAULT
+};
