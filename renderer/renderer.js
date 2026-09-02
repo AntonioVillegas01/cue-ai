@@ -1,7 +1,7 @@
 /* cue renderer — UI state, mic capture, IPC, streaming render. */
 (function () {
   const { icon } = window.ICONS;
-  const { highlightCode } = window.HIGHLIGHT;
+  const { highlightCode, languageLabel } = window.HIGHLIGHT;
   const cue = window.cue; // exposed by preload
   const $ = (s) => document.querySelector(s);
   const isWindows = cue.platform === 'win32';
@@ -18,6 +18,8 @@
   document.querySelector('.act[data-mode="recap"] .ic').innerHTML = icon('refresh-cw', { size: 16 });
   document.querySelector('.act[data-mode="leetcode"] .ic').innerHTML = icon('code', { size: 16 });
   document.querySelector('.act[data-mode="refactor"] .ic').innerHTML = icon('wrench', { size: 15 });
+  document.querySelector('.act[data-mode="tests"] .ic').innerHTML = icon('flask-conical', { size: 15 });
+  document.querySelector('#capture-btn .ic').innerHTML = icon('layers', { size: 15 });
   $('#smart-toggle .ic').innerHTML = icon('zap', { size: 14 });
   $('#code-size-btn').innerHTML = icon('type', { size: 15 });
   $('#clear-context-btn').innerHTML = icon('eraser', { size: 15 });
@@ -169,9 +171,13 @@
   // Transcribing a solution into a shared editor by eye was the actual task
   // this app was leaving to the user. Copy goes through the main process
   // because the async clipboard API is unreliable on a file:// origin.
+  // A gutter is worth its width only once a block is long enough to refer to a
+  // line by number. Below that it is a column of "1 2" next to a one-liner.
+  const MIN_LINES_FOR_GUTTER = 3;
+
   function decorateCodeBlocks(root) {
     root.querySelectorAll('pre').forEach((pre) => {
-      if (pre.parentElement && pre.parentElement.classList.contains('code-block')) return;
+      if (pre.closest('.code-block')) return;
 
       const block = document.createElement('div');
       block.className = 'code-block';
@@ -180,7 +186,7 @@
 
       const lang = document.createElement('span');
       lang.className = 'code-lang';
-      lang.textContent = pre.dataset.lang || 'code';
+      lang.textContent = languageLabel(pre.dataset.lang);
 
       const copy = document.createElement('button');
       copy.className = 'code-copy';
@@ -200,7 +206,25 @@
       head.appendChild(copy);
       pre.parentNode.insertBefore(block, pre);
       block.appendChild(head);
-      block.appendChild(pre);
+
+      // The gutter is a SIBLING of the <pre>, never a child of it. Copy reads
+      // `pre.textContent`, and a selection dragged across the block picks up
+      // whatever is inside it — line numbers living in there would end up
+      // pasted into the user's editor in front of every line.
+      const body = document.createElement('div');
+      body.className = 'code-body';
+      const lineCount = (pre.textContent || '').replace(/\n$/, '').split('\n').length;
+      if (lineCount >= MIN_LINES_FOR_GUTTER) {
+        const gutter = document.createElement('div');
+        gutter.className = 'code-gutter';
+        // Decorative: a screen reader announcing "one two three" before each
+        // line of code is worse than silence.
+        gutter.setAttribute('aria-hidden', 'true');
+        gutter.textContent = Array.from({ length: lineCount }, (_, i) => i + 1).join('\n');
+        body.appendChild(gutter);
+      }
+      body.appendChild(pre);
+      block.appendChild(body);
     });
   }
 
@@ -324,9 +348,57 @@
     cue.ask({ mode, text: text || '' });
   }
 
-  document.querySelectorAll('.act').forEach((btn) => {
+  // `[data-mode]` and not every `.act`: the multi-capture button shares the
+  // styling but stages a screenshot instead of running a mode. Without the
+  // filter it would call runMode(undefined), which flips the panel to busy and
+  // never gets an llm:done to flip it back.
+  document.querySelectorAll('.act[data-mode]').forEach((btn) => {
     btn.addEventListener('click', () => runMode(btn.dataset.mode, ''));
   });
+
+  // ---- multi-capture strip -----------------------------------------------
+  // Staged screenshots of a coding problem too long for one screen. Main owns
+  // the images; the renderer only ever learns how many there are.
+  const CAPTURE_KEYS = isMac ? '⌘⌥C' : 'Ctrl+Alt+C';
+  const SOLVE_KEYS = isMac ? '⌘⌥P' : 'Ctrl+Alt+P';
+  const TEST_KEYS = isMac ? '⌘⌥T' : 'Ctrl+Alt+T';
+  const REFACTOR_KEYS = isMac ? '⌘⌥R' : 'Ctrl+Alt+R';
+  const captureStrip = $('#capture-strip');
+  const captureDots = $('#capture-dots');
+  const captureLabel = $('#capture-label');
+  const captureHint = $('#capture-hint');
+  const captureBtn = $('#capture-btn');
+  const captureBadge = $('#capture-badge');
+
+  function renderCaptureStrip(count, max) {
+    const n = Number(count) || 0;
+    // The action-row button is the permanent entry point, so it carries the
+    // count too — the strip below it can be scrolled out of view, the button
+    // never is.
+    captureBadge.textContent = String(n);
+    captureBadge.classList.toggle('hidden', n === 0);
+    captureBtn.classList.toggle('staging', n > 0);
+
+    captureStrip.classList.toggle('hidden', n === 0);
+    if (n === 0) return;
+    captureDots.innerHTML = '<i></i>'.repeat(n);
+    captureLabel.textContent = n === 1 ? '1 capture staged' : n + ' captures staged';
+    // Verb-only labels: with four shortcuts the "to solve" phrasing wrapped the
+    // strip onto a second line in a narrow panel.
+    captureHint.textContent = n >= (Number(max) || 0)
+      ? 'that is the maximum'
+      : `${CAPTURE_KEYS} add · ${SOLVE_KEYS} solve · ${TEST_KEYS} tests · ${REFACTOR_KEYS} refactor · Esc discard`;
+  }
+
+  // Adding is the action-row button's job; the strip only offers what it alone
+  // is in a position to offer — discarding what is staged, and the two things
+  // the staged captures can be turned into.
+  captureBtn.addEventListener('click', () => { cue.captureAdd(); });
+  $('#capture-clear-btn').addEventListener('click', () => { cue.captureClear(); });
+  $('#capture-solve-btn').addEventListener('click', () => runMode('leetcode', ''));
+  $('#capture-test-btn').addEventListener('click', () => runMode('tests', ''));
+  $('#capture-refactor-btn').addEventListener('click', () => runMode('refactor', ''));
+  cue.on('capture:shots', ({ count, max }) => renderCaptureStrip(count, max));
 
   const input = $('#input');
   const placeholder = $('#placeholder');
@@ -725,6 +797,11 @@
   // Hide / collapse
   function toggleHide() {
     const collapsed = $('#panel').classList.toggle('collapsed');
+    // The wrap fills the window's height, so it has to stop doing that while the
+    // panel is hidden — otherwise it stays a full-window invisible box and the
+    // click-through hit test (which looks for `#panel-wrap`) keeps swallowing
+    // clicks that should reach the screen behind cue.
+    $('#panel-wrap').classList.toggle('collapsed', collapsed);
     $('#hide-btn').classList.toggle('collapsed', collapsed);
     $('#live-dot').style.display = collapsed ? 'none' : '';
   }
@@ -1453,6 +1530,7 @@
     document.querySelectorAll('#provider-seg button').forEach((b) => b.classList.toggle('on', b.dataset.provider === settings.provider));
     $('#key-openai').value = settings.apiKeys.openai || '';
     $('#key-anthropic').value = settings.apiKeys.anthropic || '';
+    $('#anthropic-workspace-id').value = settings.anthropicWorkspaceId || '';
     $('#key-gemini').value = settings.apiKeys.gemini || '';
     $('#key-deepgram').value = settings.apiKeys.deepgram || '';
     $('#key-custom').value = settings.apiKeys.custom || '';
@@ -1598,7 +1676,10 @@
     document.querySelectorAll('#settings [data-key-for]').forEach((row) => {
       const isActive = row.dataset.keyFor === provider;
       row.classList.toggle('is-active', isActive);
-      row.classList.toggle('is-missing', isActive && missing);
+      // An optional row (the Anthropic workspace id) belongs to the provider but
+      // is not the credential whose absence `missing` describes, so it is never
+      // painted as the thing to fill in.
+      row.classList.toggle('is-missing', isActive && missing && !row.hasAttribute('data-optional'));
     });
 
     const help = $('#active-key-help');
@@ -1796,6 +1877,7 @@
     // Keys
     settings.apiKeys.openai = $('#key-openai').value.trim();
     settings.apiKeys.anthropic = $('#key-anthropic').value.trim();
+    settings.anthropicWorkspaceId = $('#anthropic-workspace-id').value.trim();
     settings.apiKeys.gemini = $('#key-gemini').value.trim();
     settings.apiKeys.deepgram = $('#key-deepgram').value.trim();
     settings.apiKeys.custom = $('#key-custom').value.trim();
@@ -2050,10 +2132,14 @@
     const assistHintEl = document.getElementById('assist-shortcut-hint');
     const solveHintEl = document.getElementById('solve-shortcut-hint');
     const refactorHintEl = document.getElementById('refactor-shortcut-hint');
+    const captureHintEl = document.getElementById('capture-shortcut-hint');
+    if (captureHintEl) captureHintEl.textContent = CAPTURE_KEYS;
     if (sayHintEl) sayHintEl.textContent = isWindows ? 'Ctrl+Shift+↵' : '⌘⇧↵';
     if (assistHintEl) assistHintEl.textContent = isWindows ? 'Ctrl+↵' : '⌘↵';
     if (solveHintEl) solveHintEl.textContent = isWindows ? 'Ctrl+H' : '⌘H';
     if (refactorHintEl) refactorHintEl.textContent = isWindows ? 'Ctrl+R' : '⌘R';
+    const testsHintEl = document.getElementById('tests-shortcut-hint');
+    if (testsHintEl) testsHintEl.textContent = isWindows ? 'Ctrl+T' : '⌘T';
 
     applyCodeFontSize(settings.codeFontSize);
     // Real fallbacks from src/llm.js, so the model placeholders cannot drift
@@ -2085,6 +2171,11 @@
     if (isWindows) {
       placeholder.innerHTML = 'Ask about your screen or conversation, or <span class="keycap">Ctrl</span><span class="keycap">⏎</span> for Assist';
     }
+
+    // The session lives in main, so a renderer reload must re-read it rather
+    // than assume the strip starts empty.
+    const shots = await cue.captureShots().catch(() => ({ count: 0, max: 0 }));
+    renderCaptureStrip(shots.count, shots.max);
 
     const st = await cue.captureState();
     $('#live-dot').classList.toggle('off', !st.active);

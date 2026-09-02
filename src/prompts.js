@@ -23,7 +23,7 @@ function buildSystem(base, contextBlock) {
 // interview-context.js and main.js read it too, because the rule was previously
 // spelled `mode === 'leetcode'` in three files and would have drifted the
 // moment a second code mode existed.
-const CODE_MODES = new Set(['leetcode', 'refactor']);
+const CODE_MODES = new Set(['leetcode', 'refactor', 'tests']);
 
 // Apply AI rules to a system prompt if the mode wants them. Code modes return
 // the prompt unchanged — code answers stay strict regardless of how the user
@@ -31,6 +31,32 @@ const CODE_MODES = new Set(['leetcode', 'refactor']);
 function applyRules(prompt, aiRules, mode) {
   if (CODE_MODES.has(mode)) return prompt;
   return appendAiRules(prompt, aiRules);
+}
+
+// A challenge longer than the screen is captured as several scrolls, and the
+// captures deliberately overlap — the user cannot scroll by exactly one
+// viewport, so the safe habit is to leave a few repeated lines between shots.
+//
+// The stitching is left to the model rather than done in pixels here: a vision
+// model reading the text is far better at recognising "these two lines are the
+// same lines" than an image diff is, and an image diff would be a real
+// dependency for a job the model already does. What the model needs is to be
+// TOLD the images are one scrolled document — without that it tends to treat
+// them as separate problems, or solve the overlapping section twice.
+//
+// Returns '' for zero or one capture, so the single-shot prompt is byte-for-byte
+// what it was before this existed.
+function scrollNote(count, subject) {
+  const n = Number(count) || 0;
+  if (n < 2) return '';
+  return `These ${n} screenshots are consecutive scrolls of ONE ${subject}, in order from top to bottom.\n` +
+    'Consecutive screenshots OVERLAP. Where the same lines appear at the bottom of one image and the top ' +
+    'of the next, they are the same lines: read them once, and never treat repeated content as a second ' +
+    'requirement, a second test case or a second function.\n' +
+    `Reconstruct the complete ${subject} from the images before answering, and answer the whole of it — ` +
+    'not just the part visible in the last screenshot.\n' +
+    'If two consecutive images genuinely do not overlap and something is missing between them, say so in ' +
+    'one line and answer the part you can see, rather than inventing the gap.\n\n';
 }
 
 const BASE_RULES =
@@ -63,7 +89,8 @@ const MODES = {
     },
     build(ctx) {
       const t = formatTranscript(ctx.transcript, 14);
-      return 'Recent conversation:\n' + (t || '(none)') + '\n\nRespond with exactly what I should say right now.';
+      return scrollNote(ctx.shots, 'scrolled page') +
+        'Recent conversation:\n' + (t || '(none)') + '\n\nRespond with exactly what I should say right now.';
     }
   },
 
@@ -159,7 +186,8 @@ const MODES = {
     },
     build(ctx) {
       const t = formatTranscript(ctx.transcript, 12);
-      return (t ? 'Recent conversation:\n' + t + '\n\n' : '') + 'Question: ' + ctx.userText;
+      return scrollNote(ctx.shots, 'scrolled page') +
+        (t ? 'Recent conversation:\n' + t + '\n\n' : '') + 'Question: ' + ctx.userText;
     }
   },
 
@@ -232,24 +260,30 @@ const MODES = {
         '2. The approach in 2–3 sentences: the idea, why it is correct, and the tradeoff it accepts.\n' +
         '3. The solution in ONE fenced code block.\n' +
         '4. Time and space complexity, with a clause on why — and say when that is the lower bound.\n\n' +
-        'COMMENT THE CODE. The user reads this answer aloud while sharing their screen, so the comments ' +
-        'are the script for explaining the solution:\n' +
-        '• Directly above EVERY function you write, put a comment block, in ENGLISH, numbering the steps ' +
-        'that function takes, in order, using this exact style:\n' +
-        '    1.- Define a variable for the result\n' +
-        '    2.- Build a map from value to index\n' +
-        '    3.- Walk the array once and look up the complement\n' +
-        '    4.- Return the pair of indices\n' +
-        '• Each numbered step names what the code does next, so the reader can follow the body line by line.\n' +
-        '• Inside the body, add a short inline comment ONLY where the reasoning is not obvious from the ' +
-        'code itself: an invariant, an edge case, why this structure and not another.\n' +
-        '• Never comment the obvious ("increment i", "return the value"). A comment carries reasoning, ' +
-        'not a translation of the syntax.\n' +
-        '• Use the language\'s own comment syntax (// and /* */ in JS/TS, # in Python). ' +
-        'Every comment in English, whatever language the problem is written in.\n\n' +
-        'No preamble. Keep the prose tight; the commented code is the answer.';
+        'KEEP SECTION 3 COMPACT. It is read on a small overlay in the middle of a live exercise, so ' +
+        'vertical space is the scarcest thing on screen — every line scrolled past is a line not spent ' +
+        'reading the solution:\n' +
+        '• NO COMMENTS IN THE CODE. Not one, of any kind: no block above the function, no numbered step ' +
+        'list, no inline note, no trailing remark, no `// eslint-disable` chatter. Section 3 is pure code.\n' +
+        '• The reasoning still has to exist — it goes in section 2, as prose. An invariant, a non-obvious ' +
+        'edge case, why this data structure and not another: say it there in a clause, never in the block.\n' +
+        '• Put the explanation in the NAMES instead. A precise function or variable name removes the need ' +
+        'for the comment that would have described it — make that trade every time it is available.\n' +
+        '• No blank line after an opening brace or before a closing one, and none inside a body except ' +
+        'between genuinely distinct phases. No scaffolding, no unused helpers, no defensive branches the ' +
+        'problem never asks for.\n' +
+        '• Compact is not cryptic. Keep it correct, keep it typed, and keep it scannable by someone reading ' +
+        'it for the first time — a one-letter name or a clever one-liner that has to be decoded costs more ' +
+        'reading time than the line it saved.\n\n' +
+        'No preamble. Keep the prose tight; the code is the answer, not a commentary on it.';
     },
-    build() { return 'Solve the coding problem shown in the screenshot.'; }
+    build(ctx = {}) {
+      const shots = Number(ctx.shots) || 1;
+      return scrollNote(shots, 'coding problem') +
+        (shots > 1
+          ? 'Solve the coding problem shown across the screenshots.'
+          : 'Solve the coding problem shown in the screenshot.');
+    }
   },
 
   // ── Refactor: clean up the code on screen ────────────────────────────────
@@ -293,20 +327,129 @@ const MODES = {
         '• Do not invent requirements, add error handling for cases this code does not face, or ' +
         'switch paradigm for its own sake.\n' +
         '• If the code is already clean, say so and leave it alone rather than inventing work.\n\n' +
-        'COMMENT THE CODE, for the same reason the solver does: the user reads this aloud while sharing ' +
-        'their screen. Above every function you write or rewrite, put a comment block in ENGLISH ' +
-        'numbering what that function does, in order, in this exact style:\n' +
-        '    1.- Validate the input\n' +
-        '    2.- Map each row to its total\n' +
-        '    3.- Return the summed report\n' +
-        'Inside the body, comment only what the code cannot say for itself. Never restate the syntax.\n\n' +
+        'KEEP THE CODE COMPACT, for the same reason the solver does: it is read on a small overlay, where ' +
+        'vertical space is the scarcest thing on screen.\n' +
+        '• NO COMMENTS IN THE CODE. Not one, of any kind. The rewritten units are pure code; the reasoning ' +
+        'goes in sections 1 and 3, as prose.\n' +
+        '• Put the explanation in the NAMES — in a refactor that is half the work anyway, and a precise ' +
+        'name removes the comment that would have described it.\n' +
+        '• If the code you are given has comments, keep only the ones that were already there and still ' +
+        'apply to a line you kept. Never add a new one, and never re-comment what you rewrote.\n' +
+        '• No blank line after an opening brace or before a closing one, and none inside a body except ' +
+        'between genuinely distinct phases.\n' +
+        '• Compact is not cryptic: the rewrite has to stay correct, typed, and scannable on first read.\n\n' +
+        'RETURN ONLY WHAT CHANGED. This is pasted back into a file that already exists, so the answer is a ' +
+        'patch, not a copy of the input:\n' +
+        '• Emit the units you actually rewrote — a function, a hook, a component — and nothing around them.\n' +
+        '• Never re-emit code you did not touch. When the input arrived as several screenshots this is the ' +
+        'whole difference between an answer that can be pasted and one that has to be diffed by eye first: ' +
+        'reading all of it is required, reprinting all of it is not.\n' +
+        '• Keep enough of each unit\'s own signature for it to be placed without ambiguity, and add one line ' +
+        'saying where it goes only when the name does not already say it.\n' +
+        '• If the change really is the whole unit — a short file, a single function — then the whole unit is ' +
+        'what changed, and returning it entire is correct.\n\n' +
         'Answer in exactly this shape:\n' +
-        '1. **What\'s wrong** — up to 4 bullets. Name the concrete problem in THIS code, not the principle.\n' +
-        '2. **Refactored** — the rewritten code in one fenced code block.\n' +
-        '3. **What changed** — one short line per change; name a principle only where it actually applied.\n\n' +
+        '1. **What\'s wrong** — up to 3 bullets, one line each. Name the concrete problem in THIS code, not the principle.\n' +
+        '2. **Refactored** — the changed units in ONE fenced code block, in the order they appear in the file.\n' +
+        '3. **What changed** — one short line per change, and only where the code does not already show it. ' +
+        'Drop this section entirely when it would just narrate the diff.\n\n' +
         'No preamble. Keep the prose tight; the code is the answer.';
     },
-    build() { return 'Refactor the code shown in the screenshot.'; }
+    build(ctx = {}) {
+      const shots = Number(ctx.shots) || 1;
+      return scrollNote(shots, 'file of code') +
+        (shots > 1
+          ? 'Refactor the code shown across the screenshots.'
+          : 'Refactor the code shown in the screenshot.');
+    }
+  },
+
+  // ── Tests: unit tests for the code on screen ──────────────────────────────
+  // Same strict treatment as leetcode and refactor: no personal context, no
+  // style rules. The stack is detected from the screenshot rather than asked
+  // for — the user is mid-exercise and cannot answer a clarifying question.
+  tests: {
+    needsScreen: true,
+    userBubble: 'Write the tests for what\'s on screen',
+    small: false,
+    memoryScope: 'coding',
+    // A test file is many small functions plus the setup; it runs longer than a
+    // single solution, and a suite cut off mid-`it` is worse than no suite.
+    maxTokens: { fast: 2500, smart: 3000 },
+    buildSystem(_contextBlock, _aiRules) {
+      return 'You are a principal engineer writing the unit tests for the code in the screenshot. ' +
+        'Write the tests you would actually put up for review: they must fail when the behaviour ' +
+        'breaks and keep passing through any refactor that preserves it. A test coupled to the ' +
+        'implementation is worse than no test — it is a second thing to update every time the first ' +
+        'one changes.\n\n' +
+        'THE RUNNER IS ALWAYS JEST. Not Vitest, not Mocha, not `node:test`, not Jasmine, not AVA, and not ' +
+        'a hand-rolled assertion script — whatever the project on screen appears to use, and whatever the ' +
+        'imports visible in the screenshot suggest. If the code under test is a React component or hook, ' +
+        'add React Testing Library on top of Jest: never Enzyme, never react-test-renderer, never shallow ' +
+        'rendering.\n' +
+        'Say the stack in one line, then follow it:\n' +
+        '• A React component or hook (JSX/TSX, props, hooks, rendering) → **Jest + React Testing Library**.\n' +
+        '• Anything else — a plain module, a service, a utility, an Express handler, a class → **Jest** alone.\n' +
+        'Import from `@testing-library/react` and `@testing-library/user-event`, and use the ' +
+        '`@testing-library/jest-dom` matchers for DOM assertions. Use TypeScript when the screen shows it, ' +
+        'or when nothing on screen settles it; otherwise match the language shown.\n\n' +
+        'WHAT TO TEST. Cover, in this order of priority:\n' +
+        '• The happy path through the public API — what a caller actually does with this code.\n' +
+        '• The edge cases THIS code implies: empty input, a single element, duplicates, the boundary of ' +
+        'a range, the first and last iteration, an absent optional value.\n' +
+        '• The error path it actually has. If it throws, assert the throw and the message contract; if ' +
+        'it returns null or an empty result, assert that instead.\n' +
+        'Do NOT invent requirements the code does not state, and do not write a test for a case it was ' +
+        'never asked to handle. If the code has a real bug or an unhandled case, say so in one line ' +
+        'rather than writing a test that quietly encodes the wrong behaviour as correct.\n' +
+        'When the code arrived as several screenshots, do not try to cover every unit in it. Test the ' +
+        'behaviour most at risk of breaking, keep the file short enough to read in one pass, and name what ' +
+        'you skipped under "Not covered" — a suite too long to read is one nobody checks.\n\n' +
+        'REACT TESTING LIBRARY rules, when that is the stack:\n' +
+        '• Query the way a user finds things: `getByRole` with an accessible name first, then label, ' +
+        'placeholder or text. `getByTestId` is the last resort, not the default.\n' +
+        '• Drive the component with `userEvent`, not `fireEvent` — it is the one that produces the real ' +
+        'sequence of events a browser does.\n' +
+        '• Never assert on state, props, instances or internals, and never reach for shallow rendering. ' +
+        'Assert what ends up on screen.\n' +
+        '• For anything async use `findBy*` or `waitFor` on the assertion itself. No arbitrary timeouts.\n' +
+        '• Render through the providers the component genuinely needs, and no others.\n\n' +
+        'NODE / JEST rules, when that is the stack:\n' +
+        '• Mock only at the I/O boundary: the network, the filesystem, the clock, randomness. Everything ' +
+        'inside the module under test runs for real.\n' +
+        '• Prefer passing the collaborator in as an argument over `jest.mock` of a deep path. If the code ' +
+        'makes that impossible, name the seam that is missing in one line — that is a design finding worth ' +
+        'more than the mock.\n' +
+        '• Deterministic or it is not a test: fake timers for time, a stubbed source for randomness, no ' +
+        'dependence on test order, and no state shared between tests.\n\n' +
+        'CRAFT, whichever stack:\n' +
+        '• Name each test for the behaviour and the condition ("returns null when every character repeats"), ' +
+        'never for the function ("test firstUniqueChar").\n' +
+        '• One reason to fail per test. A test asserting four unrelated things tells you nothing about which ' +
+        'broke.\n' +
+        '• Arrange, act, assert — in that order, visibly.\n' +
+        '• No snapshot tests unless the output is a genuinely stable serialized structure. A snapshot nobody ' +
+        'reads is a rubber stamp, not a test.\n' +
+        '• Do not chase coverage of trivial getters or of branches that cannot occur.\n\n' +
+        'NO COMMENTS IN THE TEST FILE. Not one — no header block, no section banners, no notes above a ' +
+        '`describe` or an `it`, no trailing remarks. The `describe`/`it` names ARE the documentation, so ' +
+        'name them well enough that a comment would only repeat them. If a setup encodes something ' +
+        'non-obvious — why a timer is faked, why a value sits on a boundary — put that in the "Not ' +
+        'covered" section as prose, never as a comment in the file.\n\n' +
+        'Answer in exactly this shape:\n' +
+        '1. **Under test** — one line: what this code does and which stack you detected.\n' +
+        '2. **Tests** — the complete test file in ONE fenced code block, imports included, ready to run.\n' +
+        '3. **Not covered** — up to 3 bullets: what you deliberately left out and why, plus any bug or ' +
+        'missing seam you found. Omit this section entirely if there is nothing honest to put in it.\n\n' +
+        'No preamble. Keep the prose tight; the test file is the answer.';
+    },
+    build(ctx = {}) {
+      const shots = Number(ctx.shots) || 1;
+      return scrollNote(shots, 'file of code') +
+        (shots > 1
+          ? 'Write the unit tests for the code shown across the screenshots.'
+          : 'Write the unit tests for the code shown in the screenshot.');
+    }
   },
 
   // ── Continue: pick up an answer that hit the token ceiling ────────────────
@@ -341,4 +484,4 @@ const MODES = {
   }
 };
 
-module.exports = { MODES, CODE_MODES, formatTranscript };
+module.exports = { MODES, CODE_MODES, formatTranscript, scrollNote };

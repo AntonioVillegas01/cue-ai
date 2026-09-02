@@ -1,5 +1,10 @@
 // LLM factory — OpenAI, Anthropic, Gemini, and OpenAI-compatible APIs behind one streaming interface.
-// stream({ system, turns:[{role,text}], imageDataUrl, maxTokens, onToken }) -> Promise<fullText>
+// stream({ system, turns:[{role,text}], imageDataUrl|imageDataUrls, maxTokens, onToken }) -> Promise<fullText>
+//
+// Images attach to the LAST user turn. A single screenshot may be passed as
+// `imageDataUrl`; a scrolled coding challenge arrives as `imageDataUrls`, in
+// capture order — every provider below preserves that order, because "these are
+// consecutive scrolls" is only true if the model sees them top to bottom.
 
 const { createCompatibleClientOptions } = require('./openai-compatible');
 
@@ -70,9 +75,24 @@ function formatRetryWait(seconds) {
   return `${minutes} minute${minutes === 1 ? '' : 's'}`;
 }
 
+// An identity-linked Anthropic key is scoped to a workspace and rejects every
+// request until the `anthropic-workspace-id` header names one. The provider's
+// own wording explains the protocol but not where to fix it in cue, and the
+// setting is easy to miss, so this failure gets its own message.
+function isWorkspaceRequiredError(error) {
+  const rawMessage = (error && (error.message || String(error))) || '';
+  const code = (error && (error.code || error.error?.code)) || '';
+  return /anthropic-workspace-id|workspace_id_required/i.test(`${rawMessage} ${code}`);
+}
+
 function formatProviderErrorMessage(error, provider, model) {
   const label = normalizeProviderName(provider);
   const rawMessage = (error && (error.message || String(error))) || '';
+
+  if (isWorkspaceRequiredError(error)) {
+    return `Your ${label} API key is identity-linked, so every request has to say which workspace it acts in. ` +
+      `Open Settings → Keys, paste the workspace id from the ${label} Console into "Workspace", and try again.`;
+  }
 
   if (isQuotaError(error)) {
     const retrySeconds = extractRetryDelaySeconds(rawMessage);
@@ -120,17 +140,24 @@ function stripDataUrl(dataUrl) {
   return m ? { mime: m[1], b64: m[2] } : null;
 }
 
-async function streamOpenAI({ apiKey, baseURL, model, system, turns, imageDataUrl, maxTokens, onToken, onTruncated = () => {} }) {
+// One list of images from either spelling, so every provider below reads the
+// same shape and a caller can keep passing a single `imageDataUrl`.
+function normalizeImages({ imageDataUrls, imageDataUrl } = {}) {
+  const list = Array.isArray(imageDataUrls) && imageDataUrls.length ? imageDataUrls : [imageDataUrl];
+  return list.filter((url) => typeof url === 'string' && url);
+}
+
+async function streamOpenAI({ apiKey, baseURL, model, system, turns, images = [], maxTokens, onToken, onTruncated = () => {} }) {
   const OpenAI = require('openai');
   const client = new OpenAI(baseURL ? { apiKey, baseURL } : { apiKey });
   const messages = [{ role: 'system', content: system }];
   turns.forEach((t, i) => {
     const last = i === turns.length - 1;
-    if (last && imageDataUrl && t.role === 'user') {
+    if (last && images.length && t.role === 'user') {
       messages.push({
         role: 'user', content: [
           { type: 'text', text: t.text },
-          { type: 'image_url', image_url: { url: imageDataUrl } }
+          ...images.map((url) => ({ type: 'image_url', image_url: { url } }))
         ]
       });
     } else {
@@ -161,16 +188,16 @@ function normalizeAzureBaseURL(raw) {
   return u;
 }
 
-async function streamAzure({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken, endpoint, onTruncated = () => {} }) {
+async function streamAzure({ apiKey, model, system, turns, images = [], maxTokens, onToken, endpoint, onTruncated = () => {} }) {
   const url = normalizeAzureBaseURL(endpoint);
   if (!url) throw new Error('Missing Azure endpoint. Add your Azure AI Foundry or Azure OpenAI endpoint in Settings.');
   const messages = [{ role: 'system', content: system }];
   turns.forEach((t, i) => {
     const last = i === turns.length - 1;
-    if (last && imageDataUrl && t.role === 'user') {
+    if (last && images.length && t.role === 'user') {
       messages.push({ role: 'user', content: [
         { type: 'text', text: t.text },
-        { type: 'image_url', image_url: { url: imageDataUrl } }
+        ...images.map((image) => ({ type: 'image_url', image_url: { url: image } }))
       ] });
     } else {
       messages.push({ role: t.role, content: t.text });
@@ -204,15 +231,23 @@ async function streamAzure({ apiKey, model, system, turns, imageDataUrl, maxToke
   return full;
 }
 
-async function streamAnthropic({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken, onTruncated = () => {} }) {
+async function streamAnthropic({ apiKey, model, system, turns, images = [], maxTokens, onToken, workspaceId, onTruncated = () => {} }) {
   const Anthropic = require('@anthropic-ai/sdk');
-  const client = new Anthropic({ apiKey });
+  // An identity-linked key is scoped to a workspace and 400s on every request
+  // until the header names which one. An ordinary key needs no header, and
+  // sending an empty one is not the same as sending none — so the option is
+  // omitted entirely when unset rather than passed as ''.
+  const options = { apiKey };
+  if (workspaceId) options.defaultHeaders = { 'anthropic-workspace-id': workspaceId };
+  const client = new Anthropic(options);
   const messages = turns.map((t, i) => {
     const last = i === turns.length - 1;
-    if (last && imageDataUrl && t.role === 'user') {
-      const img = stripDataUrl(imageDataUrl);
+    if (last && images.length && t.role === 'user') {
       const content = [];
-      if (img) content.push({ type: 'image', source: { type: 'base64', media_type: img.mime, data: img.b64 } });
+      for (const image of images) {
+        const img = stripDataUrl(image);
+        if (img) content.push({ type: 'image', source: { type: 'base64', media_type: img.mime, data: img.b64 } });
+      }
       content.push({ type: 'text', text: t.text });
       return { role: 'user', content };
     }
@@ -229,15 +264,17 @@ async function streamAnthropic({ apiKey, model, system, turns, imageDataUrl, max
   return full;
 }
 
-async function streamGemini({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken, onTruncated = () => {} }) {
+async function streamGemini({ apiKey, model, system, turns, images = [], maxTokens, onToken, onTruncated = () => {} }) {
   const { GoogleGenAI } = require('@google/genai');
   const ai = new GoogleGenAI({ apiKey });
   const contents = turns.map((t, i) => {
     const last = i === turns.length - 1;
     const parts = [{ text: t.text }];
-    if (last && imageDataUrl && t.role === 'user') {
-      const img = stripDataUrl(imageDataUrl);
-      if (img) parts.push({ inlineData: { mimeType: img.mime, data: img.b64 } });
+    if (last && images.length && t.role === 'user') {
+      for (const image of images) {
+        const img = stripDataUrl(image);
+        if (img) parts.push({ inlineData: { mimeType: img.mime, data: img.b64 } });
+      }
     }
     return { role: t.role === 'assistant' ? 'model' : 'user', parts };
   });
@@ -256,17 +293,17 @@ async function streamGemini({ apiKey, model, system, turns, imageDataUrl, maxTok
   return full;
 }
 
-async function streamOllama({ apiKey, model, system, turns, imageDataUrl, maxTokens, onToken, onTruncated = () => {} }) {
+async function streamOllama({ apiKey, model, system, turns, images = [], maxTokens, onToken, onTruncated = () => {} }) {
   const baseUrl = apiKey || 'http://localhost:11434';
   const url = `${baseUrl.replace(/\/$/, '')}/api/chat`;
 
   const messages = [{ role: 'system', content: system }];
   turns.forEach((t, i) => {
     const last = i === turns.length - 1;
-    if (last && imageDataUrl && t.role === 'user') {
-      const img = stripDataUrl(imageDataUrl);
-      if (img) {
-        messages.push({ role: 'user', content: t.text, images: [img.b64] });
+    if (last && images.length && t.role === 'user') {
+      const b64 = images.map(stripDataUrl).filter(Boolean).map((img) => img.b64);
+      if (b64.length) {
+        messages.push({ role: 'user', content: t.text, images: b64 });
       } else {
         messages.push({ role: 'user', content: t.text });
       }
@@ -338,6 +375,7 @@ function createLLM(settings) {
   if (!model) model = DEFAULT_MODELS[provider] || '';
   const minimaxRegion = settings.minimaxRegion || 'global_en';
   const endpoint = settings.azureEndpoint || '';
+  const workspaceId = settings.anthropicWorkspaceId || '';
 
   if (provider === CUSTOM_PROVIDER) {
     try {
@@ -374,12 +412,15 @@ function createLLM(settings) {
     async stream(params) {
       if (!ready) throw new Error(configurationError || `Complete the ${provider} provider settings.`);
       const args = {
-        apiKey, baseURL, endpoint, model,
+        apiKey, baseURL, endpoint, model, workspaceId,
         ...params,
         // A mode may ask for a bigger budget than the tier default; anything
         // unusable falls back rather than being passed through to the provider.
         maxTokens: resolveMaxTokens(params && params.maxTokens, maxTokens),
-        turns: sanitizeTurns(params.turns)
+        turns: sanitizeTurns(params.turns),
+        // Resolved once here so every provider branch reads the same list and
+        // neither spelling has to be handled five times.
+        images: normalizeImages(params)
       };
       try {
         if (provider === 'openai') return await streamOpenAI(args);
@@ -404,6 +445,8 @@ module.exports = {
   normalizeProviderName,
   formatProviderErrorMessage,
   isQuotaError,
+  isWorkspaceRequiredError,
+  normalizeImages,
   resolveMaxTokens,
   MAX_TOKENS_CEILING,
   CURRENT_GEMINI_DEFAULT

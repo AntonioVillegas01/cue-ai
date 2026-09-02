@@ -496,3 +496,176 @@ test('DEFAULT_MODELS is exported and covers every provider the settings UI offer
     assert.ok(DEFAULT_MODELS[provider], `DEFAULT_MODELS is missing ${provider}`);
   }
 });
+
+// ── Multi-image (a coding challenge captured across several scrolls) ────────
+
+const SHOT_A = 'data:image/jpeg;base64,AAAA';
+const SHOT_B = 'data:image/jpeg;base64,BBBB';
+
+function imageSettings(provider, model) {
+  return {
+    provider, smart: false,
+    apiKeys: { [provider]: 'k' },
+    models: { [provider]: { fast: model, smart: model } },
+    azureEndpoint: 'https://example.openai.azure.com/openai'
+  };
+}
+
+test('normalizeImages accepts either spelling and drops the unusable', () => {
+  const { normalizeImages } = require('../src/llm');
+  assert.deepEqual(normalizeImages({ imageDataUrl: SHOT_A }), [SHOT_A]);
+  assert.deepEqual(normalizeImages({ imageDataUrls: [SHOT_A, SHOT_B] }), [SHOT_A, SHOT_B]);
+  // An empty array must not shadow the single-image field, or a mode that sends
+  // `imageDataUrls: []` alongside a screenshot would silently send no image.
+  assert.deepEqual(normalizeImages({ imageDataUrls: [], imageDataUrl: SHOT_A }), [SHOT_A]);
+  assert.deepEqual(normalizeImages({ imageDataUrls: [SHOT_A, '', null] }), [SHOT_A]);
+  assert.deepEqual(normalizeImages({}), []);
+});
+
+test('OpenAI attaches every capture to the last user turn, in order', async () => {
+  const llm = createLLM(imageSettings('openai', 'gpt-4o-mini'));
+  await llm.stream({
+    system: 's',
+    turns: [{ role: 'user', text: 'earlier' }, { role: 'assistant', text: 'reply' }, { role: 'user', text: 'solve it' }],
+    imageDataUrls: [SHOT_A, SHOT_B],
+    onToken: () => {}
+  });
+
+  const messages = capturedCompletionRequest.messages;
+  const last = messages[messages.length - 1];
+  assert.equal(last.role, 'user');
+  assert.deepEqual(last.content, [
+    { type: 'text', text: 'solve it' },
+    { type: 'image_url', image_url: { url: SHOT_A } },
+    { type: 'image_url', image_url: { url: SHOT_B } }
+  ]);
+  // Earlier turns stay plain strings — only the newest turn carries the images.
+  assert.equal(messages[1].content, 'earlier');
+});
+
+test('a single imageDataUrl still produces exactly one image part', async () => {
+  const llm = createLLM(imageSettings('openai', 'gpt-4o-mini'));
+  await llm.stream({
+    system: 's', turns: [{ role: 'user', text: 'solve it' }],
+    imageDataUrl: SHOT_A, onToken: () => {}
+  });
+
+  const last = capturedCompletionRequest.messages.at(-1);
+  assert.deepEqual(last.content, [
+    { type: 'text', text: 'solve it' },
+    { type: 'image_url', image_url: { url: SHOT_A } }
+  ]);
+});
+
+test('a request with no image sends a plain string, as it always did', async () => {
+  const llm = createLLM(imageSettings('openai', 'gpt-4o-mini'));
+  await llm.stream({ system: 's', turns: [{ role: 'user', text: 'no screen' }], onToken: () => {} });
+
+  assert.equal(capturedCompletionRequest.messages.at(-1).content, 'no screen');
+});
+
+test('Anthropic sends every capture as its own image block before the text', async () => {
+  const llm = createLLM(imageSettings('anthropic', 'claude-3-5-haiku-latest'));
+  await llm.stream({
+    system: 's', turns: [{ role: 'user', text: 'solve it' }],
+    imageDataUrls: [SHOT_A, SHOT_B], onToken: () => {}
+  });
+
+  const content = capturedCompletionRequest.messages.at(-1).content;
+  assert.deepEqual(content, [
+    { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: 'AAAA' } },
+    { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: 'BBBB' } },
+    { type: 'text', text: 'solve it' }
+  ]);
+});
+
+test('Gemini appends every capture as an inline data part', async () => {
+  const llm = createLLM(imageSettings('gemini', CURRENT_GEMINI_DEFAULT));
+  await llm.stream({
+    system: 's', turns: [{ role: 'user', text: 'solve it' }],
+    imageDataUrls: [SHOT_A, SHOT_B], onToken: () => {}
+  });
+
+  const parts = capturedCompletionRequest.contents.at(-1).parts;
+  assert.deepEqual(parts, [
+    { text: 'solve it' },
+    { inlineData: { mimeType: 'image/jpeg', data: 'AAAA' } },
+    { inlineData: { mimeType: 'image/jpeg', data: 'BBBB' } }
+  ]);
+});
+
+// ── Anthropic workspace id (identity-linked keys) ──────────────────────────
+
+function anthropicSettings(overrides = {}) {
+  return {
+    provider: 'anthropic', smart: false,
+    apiKeys: { anthropic: 'sk-ant-x' },
+    models: { anthropic: { fast: 'claude-3-5-haiku-latest', smart: 'claude-3-5-haiku-latest' } },
+    ...overrides
+  };
+}
+
+test('a workspace id is sent as the anthropic-workspace-id header', async () => {
+  const llm = createLLM(anthropicSettings({ anthropicWorkspaceId: 'wrkspc_01ABC' }));
+  await llm.stream({ system: 's', turns: [{ role: 'user', text: 'hi' }], onToken: () => {} });
+
+  assert.deepEqual(capturedClientOptions, {
+    apiKey: 'sk-ant-x',
+    defaultHeaders: { 'anthropic-workspace-id': 'wrkspc_01ABC' }
+  });
+});
+
+test('an ordinary key sends no workspace header at all', async () => {
+  // Not an empty header: absent. A blank value is a different request than no
+  // header, and the ordinary-key path must be byte-identical to before.
+  const llm = createLLM(anthropicSettings());
+  await llm.stream({ system: 's', turns: [{ role: 'user', text: 'hi' }], onToken: () => {} });
+
+  assert.deepEqual(capturedClientOptions, { apiKey: 'sk-ant-x' });
+  assert.ok(!('defaultHeaders' in capturedClientOptions));
+});
+
+test('an empty workspace id is treated as unset', async () => {
+  const llm = createLLM(anthropicSettings({ anthropicWorkspaceId: '' }));
+  await llm.stream({ system: 's', turns: [{ role: 'user', text: 'hi' }], onToken: () => {} });
+  assert.ok(!('defaultHeaders' in capturedClientOptions));
+});
+
+test('the workspace id never reaches another provider', async () => {
+  // It is an Anthropic-specific credential; leaking it into an OpenAI or Groq
+  // request would send the user's workspace to an unrelated vendor.
+  const llm = createLLM({
+    provider: 'openai', smart: false,
+    apiKeys: { openai: 'k' },
+    models: { openai: { fast: 'gpt-4o-mini', smart: 'gpt-4o-mini' } },
+    anthropicWorkspaceId: 'wrkspc_01ABC'
+  });
+  await llm.stream({ system: 's', turns: [{ role: 'user', text: 'hi' }], onToken: () => {} });
+
+  assert.deepEqual(capturedClientOptions, { apiKey: 'k' });
+});
+
+test('the workspace-required 400 is explained in terms of cue settings', () => {
+  const { isWorkspaceRequiredError } = require('../src/llm');
+  const raw = new Error('anthropic-workspace-id is required when authenticating with an identity-linked API key; send the id of the workspace this request acts in.');
+  assert.equal(isWorkspaceRequiredError(raw), true);
+
+  const message = formatProviderErrorMessage(raw, 'anthropic', 'claude-3-5-haiku-latest');
+  assert.match(message, /Settings/, 'the message must say where to fix it');
+  assert.match(message, /"Workspace"/, 'the message must name the field as the UI labels it');
+  assert.match(message, /Anthropic/);
+});
+
+test('the workspace-required check also matches the coded form', () => {
+  const { isWorkspaceRequiredError } = require('../src/llm');
+  assert.equal(isWorkspaceRequiredError({ code: 'workspace_id_required', message: 'bad request' }), true);
+  assert.equal(isWorkspaceRequiredError(new Error('some other 400')), false);
+  assert.equal(isWorkspaceRequiredError(null), false);
+});
+
+test('a workspace error is not mistaken for a quota or model error', () => {
+  const { isQuotaError } = require('../src/llm');
+  const raw = new Error('anthropic-workspace-id is required when authenticating with an identity-linked API key');
+  assert.equal(isQuotaError(raw), false);
+  assert.doesNotMatch(formatProviderErrorMessage(raw, 'anthropic', 'm'), /quota|unavailable \(404\)/i);
+});

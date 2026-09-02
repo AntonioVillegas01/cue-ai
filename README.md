@@ -165,6 +165,11 @@ cue is hidden from most screen-share tools automatically — **Google Meet, Micr
 
 - **`⌘` `↵` — Assist.** The do-the-smart-thing key. On a coding problem it solves it; in a conversation it tells you what to say. Works from anywhere. Change it under **Settings → Keyboard shortcuts**.
 - **`⌘` `H` — Solve what's on screen.** Screenshots a coding problem and returns the approach, code, and time/space complexity.
+- **`⌘` `T` — Write the tests** for the code on screen. Detects the stack and answers with a runnable file: **Jest + React Testing Library** for a component or hook, **Jest** for a plain module. Covers the happy path, the edge cases the code actually implies and its real error path — and tells you what it deliberately left out.
+- **`⌘` `⌥` `C` — Add a capture** *(for a problem longer than the screen)*, or the **Multi-capture** button next to *Refactor*. Press it, scroll, press it again — as many times as the exercise needs. The button carries a badge with how many captures are staged. Leave a few overlapping lines between captures; cue uses the overlap to stitch them back together.
+- **`⌘` `⌥` `P` — Solve every capture together.** Reconstructs the whole problem from the staged screenshots and answers it as one exercise.
+- **`⌘` `⌥` `T` — Write the tests for every capture together.** The same reconstruction, answered as one test file instead of a solution.
+- **`⌘` `⌥` `R` — Refactor everything captured**, as one unit rather than one screen at a time. `Esc` discards the captures instead.
 - **The `▢` button** (top bar) — start/stop **listening** to a meeting. The green dot means it's live.
 - **Type a question** in the box and press `↵` to ask about your screen or conversation.
 - **Smart** — flip it on for a smarter, more thorough model; off for fast and cheap.

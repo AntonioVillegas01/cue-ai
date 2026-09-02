@@ -8,9 +8,20 @@ const { highlightCode, escapeHtml } = require('../renderer/highlight.js');
 // one of these is an injection attempt that has to come out inert.
 
 test('escapes markup that appears as bare code', () => {
-  const html = highlightCode('<script>alert(1)</script>', 'js');
+  const source = '<script>alert(1)</script>';
+  const html = highlightCode(source, 'js');
   assert.ok(!html.includes('<script'), 'a raw <script> tag reached the output');
-  assert.ok(html.includes('&lt;script&gt;'));
+  // Asserted as three separate properties rather than by looking for a literal
+  // `&lt;script&gt;`: the angle brackets are operator tokens now, so the
+  // escaped text is split across spans. Contiguity was never the guarantee —
+  // these three are.
+  const tags = [...html.matchAll(/<\/?([a-zA-Z][^\s/>]*)/g)].map((m) => m[1]);
+  assert.deepEqual([...new Set(tags)], ['span'], 'a tag other than <span> reached the output');
+  assert.equal(html.match(/<span/g).length, html.match(/<\/span>/g).length, 'unbalanced spans');
+  const text = html.replace(/<[^>]+>/g, '')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&amp;/g, '&');
+  assert.equal(text, source, 'the payload was altered rather than escaped');
 });
 
 test('escapes markup hidden inside a string literal', () => {
@@ -46,7 +57,7 @@ test('every span this emits is one of its own fixed classes', () => {
   for (const [code, lang] of samples) {
     const html = highlightCode(code, lang);
     for (const cls of html.matchAll(/<span class="([^"]*)">/g)) {
-      assert.match(cls[1], /^tok-(com|str|num|kw|fn|type)$/, `unexpected class ${cls[1]}`);
+      assert.match(cls[1], /^tok-(com|str|num|kw|fn|type|var|op)$/, `unexpected class ${cls[1]}`);
     }
   }
 });
@@ -179,4 +190,96 @@ test('the keyword set has no bogus entries', () => {
   assert.ok(!source.includes('staticstring'));
   // And `function` must be present, since it is the most common JS keyword.
   assert.ok(highlightCode('function f() {}', 'js').includes('<span class="tok-kw">function</span>'));
+});
+
+// ── Variables and operators ────────────────────────────────────────────────
+// Both used to fall through as plain text, which left them the same colour as
+// the prose around the block — the specific thing that made a code block read
+// as "dark container full of text" rather than as source.
+
+test('a plain binding is marked as a variable', () => {
+  const html = highlightCode('const count = 10;', 'ts');
+  assert.ok(html.includes('<span class="tok-var">count</span>'));
+  assert.ok(html.includes('<span class="tok-kw">const</span>'));
+  assert.ok(html.includes('<span class="tok-num">10</span>'));
+});
+
+test('operators are their own token, not leftovers', () => {
+  const html = highlightCode('const total = price * count;', 'ts');
+  assert.ok(html.includes('<span class="tok-op">=</span>'));
+  assert.ok(html.includes('<span class="tok-op">*</span>'));
+});
+
+test('a multi-character operator is one token, not three', () => {
+  for (const [src, op] of [['a === b', '==='], ['x => y', '=&gt;'], ['a ?? b', '??'], ['f(...args)', '...']]) {
+    const html = highlightCode(src, 'ts');
+    assert.ok(html.includes('<span class="tok-op">' + op + '</span>'), `${op} was split up`);
+  }
+});
+
+test('a comment is still a comment, not a run of slashes', () => {
+  // The operator branch sits after the comment branches for exactly this
+  // reason; reorder them and every `//` becomes two division signs.
+  const html = highlightCode('// note: a / b\nconst x = 1;', 'ts');
+  assert.ok(html.includes('<span class="tok-com">// note: a / b</span>'));
+  assert.ok(!/tok-op">\//.test(html), 'the comment slashes leaked into the operator token');
+});
+
+test('a block comment opener is not read as an operator', () => {
+  const html = highlightCode('/* a * b */\nx = 1;', 'ts');
+  assert.ok(html.includes('tok-com'));
+  assert.ok(!/tok-op">\*/.test(html), 'the comment star leaked into the operator token');
+});
+
+test('the sample from the brief highlights every construct distinctly', () => {
+  const source = [
+    'const count = 10;',
+    'const message = "Hello";',
+    '',
+    'function calculateTotal(price: number): number {',
+    '  return price * count;',
+    '}'
+  ].join('\n');
+  const html = highlightCode(source, 'ts');
+  assert.ok(html.includes('<span class="tok-kw">const</span>'), 'keyword');
+  assert.ok(html.includes('<span class="tok-str">&quot;Hello&quot;</span>'), 'string');
+  assert.ok(html.includes('<span class="tok-fn">calculateTotal</span>'), 'function');
+  assert.ok(html.includes('<span class="tok-var">price</span>'), 'variable');
+  assert.ok(html.includes('<span class="tok-kw">number</span>'), 'type keyword');
+  assert.ok(html.includes('<span class="tok-num">10</span>'), 'number');
+  assert.ok(html.includes('<span class="tok-op">:</span>'), 'operator');
+  // And the whole thing still round-trips to the exact source.
+  const text = html.replace(/<[^>]+>/g, '')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&amp;/g, '&');
+  assert.equal(text, source);
+});
+
+test('adding tokens did not break the escaping guarantee', () => {
+  // The operator branch matches `<` and `>`, which are the two characters this
+  // whole file exists to neutralize.
+  const html = highlightCode('if (a < b && c > d) return "<img src=x onerror=alert(1)>";', 'ts');
+  assert.ok(!html.includes('<img'), 'a raw tag reached the output');
+  const tags = [...html.matchAll(/<\/?([a-zA-Z][^\s/>]*)/g)].map((m) => m[1]);
+  assert.deepEqual([...new Set(tags)], ['span']);
+  assert.equal(html.match(/<span/g).length, html.match(/<\/span>/g).length);
+});
+
+// ── Language labels ────────────────────────────────────────────────────────
+
+test('language labels read as names, not as file extensions', () => {
+  const { languageLabel } = require('../renderer/highlight.js');
+  assert.equal(languageLabel('ts'), 'TypeScript');
+  assert.equal(languageLabel('tsx'), 'TSX');
+  assert.equal(languageLabel('js'), 'JavaScript');
+  assert.equal(languageLabel('python'), 'Python');
+  assert.equal(languageLabel('TS'), 'TypeScript', 'the tag casing is the model\'s choice, not a different language');
+});
+
+test('an unknown or missing language still yields something printable', () => {
+  const { languageLabel } = require('../renderer/highlight.js');
+  assert.equal(languageLabel('brainfuck'), 'BRAINFUCK');
+  assert.equal(languageLabel(''), 'Code');
+  assert.equal(languageLabel(undefined), 'Code');
+  assert.equal(languageLabel(null), 'Code');
 });

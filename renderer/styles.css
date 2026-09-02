@@ -22,7 +22,36 @@
   --r-keycap: 6px;
 
   --font: -apple-system, 'SF Pro Text', 'SF Pro Display', system-ui, 'Segoe UI', sans-serif;
-  --mono: 'SF Mono', ui-monospace, 'JetBrains Mono', Menlo, monospace;
+  /* Code face. Every entry is a font that ships with an OS or that developers
+     already have installed — the renderer runs under `default-src 'self'`, so a
+     webfont host is not reachable and a @font-face would silently fall back.
+     `ui-monospace` first picks the platform's own code face (SF Mono on macOS,
+     Cascadia on Windows 11) at whatever weight the system tuned it to. */
+  --mono: ui-monospace, 'SF Mono', 'JetBrains Mono', 'Cascadia Mono', 'Fira Code',
+          'Roboto Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+
+  /* ---- Code surface & syntax palette ----
+     Every colour the code block uses is declared here, in one place, so the
+     whole scheme can be retuned (or a light variant added) without hunting
+     through rules. Contrast is measured against --code-bg: the lowest of them
+     is the comment grey at ~7:1, well past the 4.5:1 WCAG AA needs for body
+     text — comments are the one token that is *meant* to recede, so if it
+     clears the bar the rest do too. */
+  --code-bg: #0e1016;
+  --code-head-bg: #14171f;
+  --code-bd: rgba(255,255,255,0.10);
+  --code-fg: #d4d9e4;              /* base: punctuation and anything untokenized */
+  --code-gutter-fg: rgba(255,255,255,0.26);
+  --code-lh: 1.65;
+
+  --tok-com: #8b98a8;
+  --tok-str: #9ed7a8;
+  --tok-num: #f0b678;
+  --tok-kw: #c39bec;
+  --tok-fn: #82aaff;
+  --tok-type: #7fd1c8;
+  --tok-var: #d4d9e4;
+  --tok-op: #93b8d6;
 }
 
 * { box-sizing: border-box; }
@@ -50,6 +79,9 @@ html, body {
   flex-direction: column;
   align-items: center;
   padding-top: 14px;
+  /* Room for the resize grip, which hangs 9px below the panel. Without it the
+     grip sits half outside the window and the bottom half is unclickable. */
+  padding-bottom: 14px;
   pointer-events: none;                  /* only the actual UI blocks; gaps pass through */
 }
 #toolbar, #panel-wrap, #settings-scrim, #onboard-scrim, #consent-scrim { pointer-events: auto; }
@@ -164,8 +196,24 @@ html.window-dragging, html.window-dragging * { cursor: grabbing !important; }
 /* 1100px rather than 624: the panel has to be able to grow when the user
    resizes the window, or the grip would move the window and change nothing
    visible. 94vw still binds below a ~1170px-wide window, which is where the
-   panel actually lives, so the default look is unchanged. */
-#panel-wrap { position: relative; margin-top: 12px; width: min(1100px, 94vw); }
+   panel actually lives, so the default look is unchanged.
+ *
+ * `flex: 1 1 auto` is the same rule for the other axis, and it is load-bearing.
+ * The width above is tied to the viewport, so widening the window widened the
+ * panel; the height was content-driven, so dragging the grip *down* resized the
+ * window and changed nothing on screen — the panel stayed exactly as tall as
+ * its own content and the grip never moved. Claiming the leftover height here
+ * is what gives `#panel`, `#panel-columns` and `#messages` (all already
+ * `flex: 1`) a definite size to grow into: flex-grow distributes free space,
+ * and an auto-height parent has none to give. */
+#panel-wrap {
+  position: relative; margin-top: 12px; width: min(1100px, 94vw);
+  flex: 1 1 auto; min-height: 0;
+}
+/* Hidden panel: stop claiming the height, or the wrap stays a full-window
+   invisible box — and the click-through test hit-tests `#panel-wrap`, so every
+   empty pixel in it would swallow clicks meant for the screen behind. */
+#panel-wrap.collapsed { flex: 0 0 auto; }
 
 /* ---- Resize grip ---- */
 /* Sits on the panel's bottom-right corner because that is the only corner the
@@ -212,10 +260,12 @@ button:focus { outline: none; }
 }
 #panel {
   padding: 20px 22px; animation: overlayIn 260ms cubic-bezier(0.22,1,0.36,1);
-  /* Bounded by the window, minus the toolbar above it, so the panel can never
-     push its own composer (or the resize grip) off the bottom edge. */
+  /* Fills the wrap, which fills the window below the toolbar. This is a
+     definite height rather than the `max-height: calc(100vh - 80px)` it
+     replaced: a max alone left the panel content-sized, so the inner
+     `flex: 1` chain had no free space and a taller window bought nothing. */
   display: flex; flex-direction: column; min-height: 0;
-  max-height: calc(100vh - 80px);
+  height: 100%;
 }
 #panel.collapsed { display: none; }
 
@@ -236,11 +286,11 @@ button:focus { outline: none; }
      to a second line on a narrow window. This replaced a hardcoded
      `calc(100vh - 340px)`, which had to guess the height of everything else
      and was wrong the moment a fifth action button was added.
-     The 62vh cap only bites on a tall window, where letting the answer grow
-     without limit would strand the composer far from the text. */
+     No `max-height`: now that the panel fills the window, a cap here would not
+     shrink the panel, it would only leave dead space inside the glass between
+     the answer and the composer on any window taller than ~800px. */
   flex: 1 1 auto;
   min-height: 90px;
-  max-height: 62vh;
   scroll-behavior: auto;
 }
 .user-bubble {
@@ -264,32 +314,83 @@ button:focus { outline: none; }
 .ai-text .w { display: inline; opacity: 0; animation: fadeUp 180ms ease forwards; }
 .ai-text ul { margin: 8px 0; padding-left: 20px; }
 .ai-text li { margin: 4px 0; }
+/* The block is an opaque card, not a tint over the panel. The panel itself is
+   translucent by design, and code read through it sat on whatever happened to
+   be on the user's desktop — a moving, arbitrary-contrast background behind
+   small monospace text. An opaque surface is the single biggest readability
+   win here, and it is what makes the measured token contrast above mean
+   anything at all. */
 .ai-text pre {
-  background: rgba(0,0,0,0.35);
-  border: 1px solid rgba(255,255,255,0.08);
-  border-radius: 10px;
-  padding: 12px 14px;
+  background: var(--code-bg);
+  border: 1px solid var(--code-bd);
+  border-radius: 12px;
+  padding: 14px 16px;
+  margin: 14px 0;
+  /* `pre` (not `pre-wrap`): indentation is preserved byte for byte and a long
+     line scrolls sideways instead of being re-flowed into something that is no
+     longer the code that was written. */
+  white-space: pre;
   overflow-x: auto;
+  overscroll-behavior-x: contain;
   font-family: var(--mono);
-  /* Set from settings.codeFontSize — reading code off a translucent overlay
-     is not the same as reading it in an editor. */
-  font-size: var(--code-fs, 13px); line-height: 1.5;
-  margin: 12px 0;
+  /* Set from settings.codeFontSize — reading code off an overlay is not the
+     same as reading it in an editor. */
+  font-size: var(--code-fs, 13px);
+  line-height: var(--code-lh);
+  /* Monospace at small sizes reads tight; a hair of tracking separates
+     `l1I` and `O0` without loosening the columns. */
+  letter-spacing: 0.015em;
+  tab-size: 2; -moz-tab-size: 2;
+  color: var(--code-fg);
+  -webkit-user-select: text; user-select: text;
 }
 
-/* ---- Code block chrome: language label + copy ---- */
-.code-block { position: relative; margin: 12px 0; }
-.code-block > pre { margin: 0; border-top-left-radius: 0; border-top-right-radius: 0; }
+/* ---- Code block chrome: language label + line numbers + copy ---- */
+/* The card owns the border and the corners; the pre inside it goes flat, so
+   the header, gutter and code read as one surface instead of stacked boxes. */
+.code-block {
+  position: relative; margin: 14px 0;
+  background: var(--code-bg);
+  border: 1px solid var(--code-bd);
+  border-radius: 12px;
+  overflow: hidden;
+}
+.code-block pre {
+  margin: 0; border: none; border-radius: 0; background: transparent;
+  flex: 1 1 auto; min-width: 0;
+}
+.code-body { display: flex; align-items: stretch; min-width: 0; }
+/* Aligned to the code by sharing its font, size and line-height — anything
+   else drifts a fraction of a line per row and is visibly wrong by line 20. */
+.code-gutter {
+  flex: none;
+  padding: 14px 12px 14px 14px;
+  font-family: var(--mono);
+  font-size: var(--code-fs, 13px);
+  line-height: var(--code-lh);
+  letter-spacing: 0.015em;
+  text-align: right;
+  white-space: pre;
+  color: var(--code-gutter-fg);
+  background: rgba(255,255,255,0.02);
+  border-right: 1px solid var(--code-bd);
+  font-variant-numeric: tabular-nums;
+  /* Belt and braces with the DOM placement: even a selection dragged across
+     the card must not pick these up. */
+  -webkit-user-select: none; user-select: none;
+}
 .code-head {
   display: flex; align-items: center; justify-content: space-between;
-  gap: 8px; padding: 5px 10px 5px 12px;
-  background: rgba(0,0,0,0.45);
-  border: 1px solid rgba(255,255,255,0.08); border-bottom: none;
-  border-radius: 10px 10px 0 0;
+  gap: 8px; padding: 6px 8px 6px 14px;
+  background: var(--code-head-bg);
+  border-bottom: 1px solid var(--code-bd);
 }
+/* No `text-transform: uppercase` — it was flattening the labels the header
+   works to produce, turning "TypeScript" back into "TYPESCRIPT" and undoing
+   the point of naming the language at all. */
 .code-lang {
-  font-family: var(--mono); font-size: 11px; letter-spacing: 0.04em;
-  text-transform: uppercase; color: var(--tx-mut);
+  font-family: var(--mono); font-size: 11px; letter-spacing: 0.02em;
+  color: rgba(255,255,255,0.62);
 }
 .code-copy {
   display: inline-flex; align-items: center; gap: 5px;
@@ -317,19 +418,34 @@ button:focus { outline: none; }
 }
 .trunc-note button:hover { background: rgba(245,158,11,0.26); }
 /* ---- Syntax highlighting (renderer/highlight.js) ----
-   Restrained on purpose: the panel is a translucent overlay sitting on top of
-   the user's real screen, so saturated colours fight the background. Comments
-   are dimmed rather than tinted, because in a solution written for reading
-   aloud the numbered steps should guide the eye without shouting. */
-.ai-text .tok-com { color: rgba(255,255,255,0.42); font-style: italic; }
-.ai-text .tok-str { color: #9ed7a8; }
-.ai-text .tok-num { color: #f0b678; }
-.ai-text .tok-kw  { color: #c39bec; }
-.ai-text .tok-fn  { color: #82aaff; }
-.ai-text .tok-type { color: #7fd1c8; }
+   Restrained on purpose: this is an overlay the user reads for thirty seconds
+   mid-exercise, not an editor they live in. Hue carries the meaning and
+   saturation stays low, so the block reads as code at a glance without
+   becoming the brightest thing on their screen. Comments are grey rather than
+   tinted — in a solution written to be read aloud the numbered steps should
+   guide the eye without competing with the code they describe. */
+.ai-text .tok-com  { color: var(--tok-com); font-style: italic; }
+.ai-text .tok-str  { color: var(--tok-str); }
+.ai-text .tok-num  { color: var(--tok-num); }
+.ai-text .tok-kw   { color: var(--tok-kw); }
+.ai-text .tok-fn   { color: var(--tok-fn); }
+.ai-text .tok-type { color: var(--tok-type); }
+.ai-text .tok-var  { color: var(--tok-var); }
+.ai-text .tok-op   { color: var(--tok-op); }
 
+/* ---- Inline code ----
+   Deliberately a different shape from a block: a chip that sits in the line of
+   prose, not a slab. It used to be styled only inside `<p>`, so the same
+   `` `useMemo` `` lost its background the moment it appeared in a bullet —
+   which is where this model puts most of its inline code. */
 .ai-text code { font-family: var(--mono); font-size: 0.92em; }
-.ai-text p code { background: rgba(255,255,255,0.10); padding: 1px 5px; border-radius: 5px; }
+.ai-text :not(pre) > code {
+  background: rgba(255,255,255,0.09);
+  border: 1px solid rgba(255,255,255,0.08);
+  color: #cfe0f5;
+  padding: 1px 5px; border-radius: 5px;
+  white-space: nowrap;
+}
 .ai-caret { display:inline-block; width:7px; height:1.05em; vertical-align:-2px; background: var(--accent); border-radius:1px; animation: blink 1s step-end infinite; margin-left: 2px; }
 .status-line { color: var(--tx-mut); font-size: 13px; margin: 10px 0 2px; }
 #cue-status { display: none; margin: 8px 0 2px; padding: 8px 12px; border-radius: 10px;
@@ -927,6 +1043,61 @@ button:focus { outline: none; }
 }
 #toast.show { display: block; animation: fadeUp 200ms ease both; }
 .act-clear:hover { color: #fca5a5 !important; background: rgba(239,68,68,0.08) !important; }
+
+/* ======================= Multi-capture ======================= */
+/* The action-row button. It lights up while captures are staged, so the row
+   itself says whether a session is open without opening anything. */
+#capture-btn.staging { color: #7FB0F9; background: rgba(60,131,245,0.10); }
+#capture-btn.staging .ic { color: #7FB0F9; }
+.capture-badge {
+  min-width: 16px; padding: 0 4px; border-radius: var(--r-pill);
+  background: rgba(60,131,245,0.85); color: #fff;
+  font-size: 10.5px; font-weight: 600; line-height: 16px; text-align: center;
+}
+.capture-badge.hidden { display: none; }
+
+
+/* Only rendered while screenshots are staged, so it costs nothing in the
+   ordinary one-shot flow. */
+/* Wraps for the same reason #action-row does: at the narrowest window the four
+   buttons no longer fit beside the label, and without this they were pushed
+   past the panel's right edge — not clipped, just unreachable, with "Solve"
+   the first casualty. Truncating the hint alone was not enough here. */
+.capture-strip {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; row-gap: 8px;
+  margin: 8px 0 2px; padding: 6px 10px; border-radius: 10px;
+  background: rgba(60,131,245,0.10); border: 1px solid rgba(60,131,245,0.28);
+  font-size: 12px; animation: fadeUp 200ms ease both;
+}
+.capture-strip.hidden { display: none; }
+.capture-dots { display: inline-flex; gap: 3px; align-items: center; }
+.capture-dots i {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: #7FB0F9; display: inline-block;
+}
+.capture-label { color: #bcd4fb; font-weight: 500; white-space: nowrap; }
+/* The hint is the one thing here that can afford to be cut: the buttons next to
+   it say the same in words. Everything else stays whole, so a narrow panel
+   truncates this rather than breaking "Test all" across two lines. */
+.capture-hint {
+  color: var(--tx-mut); font-size: 11px;
+  flex: 0 1 auto; min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* The four exits move as one block when the strip wraps. */
+.capture-actions { display: flex; align-items: center; gap: 6px; flex: none; margin-left: auto; }
+.capture-btn {
+  flex: none; white-space: nowrap;
+  padding: 3px 9px; border-radius: var(--r-pill);
+  border: 1px solid rgba(255,255,255,0.18); background: rgba(255,255,255,0.05);
+  color: var(--tx-2); font-size: 11.5px; font-family: var(--font);
+  cursor: pointer; transition: all 140ms ease;
+}
+.capture-btn:hover { background: rgba(255,255,255,0.10); }
+.capture-btn-primary {
+  border-color: rgba(60,131,245,0.5); color: #7FB0F9; background: rgba(60,131,245,0.12);
+}
+.capture-btn-primary:hover { background: rgba(60,131,245,0.20); }
 
 /* ============================ Prep status ============================ */
 .prep-status {

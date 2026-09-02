@@ -64,6 +64,8 @@
   // alone so JavaScript private fields and C# directives are not swallowed.
   const HASH_COMMENT_LANGS = /^(py|python|rb|ruby|sh|bash|zsh|shell|yaml|yml|toml|ini|r|pl|perl|make|makefile|dockerfile|conf)$/i;
 
+  // Alternation order is load-bearing: comments and strings are claimed before
+  // the operator branch, so the `/` in `//` and the `*` in `/*` never reach it.
   const TOKEN_RE = new RegExp([
     '(\\/\\*[\\s\\S]*?\\*\\/)',                 // 1 block comment
     '("""[\\s\\S]*?"""|\'\'\'[\\s\\S]*?\'\'\')', // 2 docstring
@@ -73,7 +75,13 @@
       '|\'(?:\\\\[\\s\\S]|[^\'\\\\\\n])*\'' +
       '|`(?:\\\\[\\s\\S]|[^`\\\\])*`)',          // 5 string
     '(\\b\\d[\\d_]*(?:\\.\\d+)?(?:[eE][+-]?\\d+)?\\b)', // 6 number
-    '([A-Za-z_$][A-Za-z0-9_$]*)'                 // 7 identifier
+    '([A-Za-z_$][A-Za-z0-9_$]*)',                // 7 identifier
+    // 8 operator. Matched as a run so `=>`, `===`, `?.` and `...` come out as
+    // one token instead of three adjacent spans. Brackets, braces, commas and
+    // semicolons are deliberately excluded: they are punctuation that frames
+    // the code rather than operators acting on it, and tinting them turns every
+    // line into confetti.
+    '(\\.{3}|[+\\-*/%=!<>&|^~?:]+)'
   ].join('|'), 'g');
 
   /** Is this `#` the first non-whitespace character on its line? */
@@ -122,7 +130,7 @@
     };
 
     while ((match = TOKEN_RE.exec(source)) !== null) {
-      const [text, block, doc, line, hash, str, num, ident] = match;
+      const [text, block, doc, line, hash, str, num, ident, op] = match;
 
       if (hash !== undefined && !hashIsComment && !startsLine(source, match.index)) {
         // A `#` that is not a comment here: emit it as plain text and resume
@@ -149,7 +157,12 @@
         // type being constructed, not a function being called.
         else if (/^[A-Z]/.test(ident)) out += span('tok-type', text);
         else if (isCall(source, match.index + text.length)) out += span('tok-fn', text);
-        else out += escapeHtml(text);
+        // Every remaining identifier is a binding being declared or read. It
+        // used to fall through as plain text, which made variables the one
+        // construct rendered in the same colour as the prose around the block.
+        else out += span('tok-var', text);
+      } else if (op !== undefined) {
+        out += span('tok-op', text);
       } else {
         out += escapeHtml(text);
       }
@@ -161,5 +174,35 @@
     return out;
   }
 
-  return { highlightCode, escapeHtml };
+  // The fence tag is whatever the model typed (`ts`, `TSX`, `javascript`). The
+  // header should read like a label, not like a file extension, so the common
+  // tags get a real name and anything unrecognised is upper-cased rather than
+  // guessed at. Lives here because it is language metadata, and because this
+  // module is the one that can be tested without a browser.
+  const LANGUAGE_LABELS = {
+    js: 'JavaScript', jsx: 'JSX', javascript: 'JavaScript',
+    ts: 'TypeScript', tsx: 'TSX', typescript: 'TypeScript',
+    json: 'JSON', html: 'HTML', css: 'CSS', scss: 'SCSS',
+    py: 'Python', python: 'Python', rb: 'Ruby', ruby: 'Ruby',
+    go: 'Go', rs: 'Rust', rust: 'Rust', java: 'Java',
+    c: 'C', cpp: 'C++', cs: 'C#', php: 'PHP', swift: 'Swift', kt: 'Kotlin',
+    sh: 'Shell', bash: 'Bash', zsh: 'Zsh', shell: 'Shell',
+    sql: 'SQL', yaml: 'YAML', yml: 'YAML', toml: 'TOML',
+    md: 'Markdown', markdown: 'Markdown', diff: 'Diff', graphql: 'GraphQL',
+    dockerfile: 'Dockerfile', text: 'Text', txt: 'Text'
+  };
+
+  /**
+   * Display name for a fence's language tag.
+   *
+   * @param {string} [lang] Raw tag from the fence.
+   * @returns {string} A label for the block header; 'Code' when there is no tag.
+   */
+  function languageLabel(lang) {
+    const tag = String(lang || '').trim().toLowerCase();
+    if (!tag) return 'Code';
+    return LANGUAGE_LABELS[tag] || tag.toUpperCase();
+  }
+
+  return { highlightCode, escapeHtml, languageLabel };
 });

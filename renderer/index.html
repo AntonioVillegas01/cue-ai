@@ -36,6 +36,25 @@
           <div id="panel-main">
             <div id="messages"></div>
 
+            <!-- Multi-capture: only visible while screenshots are staged. -->
+            <div id="capture-strip" class="capture-strip hidden">
+              <span class="capture-dots" id="capture-dots" aria-hidden="true"></span>
+              <span class="capture-label" id="capture-label">0 captures</span>
+              <span class="capture-hint" id="capture-hint"></span>
+              <div class="spacer"></div>
+              <!-- One group, so the buttons wrap together instead of the spacer
+                   stranding whichever one still fitted on the previous row.
+                   Labels drop the "all": the strip already says "3 captures
+                   staged" beside them, and four two-word buttons did not fit a
+                   narrow panel. -->
+              <div class="capture-actions">
+                <button id="capture-clear-btn" class="capture-btn" title="Discard the staged captures (Esc)">Discard</button>
+                <button id="capture-test-btn" class="capture-btn" title="Write the unit tests for every staged capture as one file">Tests</button>
+                <button id="capture-refactor-btn" class="capture-btn" title="Refactor the code across every staged capture as one unit">Refactor</button>
+                <button id="capture-solve-btn" class="capture-btn capture-btn-primary" title="Solve every staged capture as one problem">Solve</button>
+              </div>
+            </div>
+
             <div id="action-row">
               <button class="act act-primary" data-mode="say"
                 title="Suggests what to say next based on the conversation">
@@ -50,7 +69,7 @@
               </button>
               <span class="sep">•</span>
               <button class="act act-secondary" data-mode="leetcode" id="solve-btn"
-                title="Screenshots the display your cursor is on and solves the coding problem">
+                title="Screenshots the display your cursor is on and solves the coding problem. Longer than the screen? Stage a capture per scroll, then solve them together.">
                 <span class="ic"></span><span>Solve</span>
                 <span class="shortcut-hint" id="solve-shortcut-hint"></span>
               </button>
@@ -59,6 +78,21 @@
                 title="Screenshots the display your cursor is on and refactors the code">
                 <span class="ic"></span><span>Refactor</span>
                 <span class="shortcut-hint" id="refactor-shortcut-hint"></span>
+              </button>
+              <span class="sep">•</span>
+              <button class="act act-secondary" data-mode="tests" id="tests-btn"
+                title="Screenshots the display your cursor is on and writes the unit tests — React Testing Library for a component, Jest for a plain module">
+                <span class="ic"></span><span>Test</span>
+                <span class="shortcut-hint" id="tests-shortcut-hint"></span>
+              </button>
+              <span class="sep">•</span>
+              <!-- Multi-capture. No data-mode: this button stages a screenshot,
+                   it does not run a mode. -->
+              <button class="act act-secondary" id="capture-btn"
+                title="For a problem longer than the screen: capture, scroll, capture again — then solve them together">
+                <span class="ic"></span><span>Multi-capture</span>
+                <span class="capture-badge hidden" id="capture-badge">0</span>
+                <span class="shortcut-hint" id="capture-shortcut-hint"></span>
               </button>
               <span class="sep">•</span>
               <button class="act" data-mode="followup"><span class="ic"></span><span>Follow-up</span></button>
@@ -148,6 +182,12 @@
         <div class="s-help" id="active-key-help"></div>
         <div class="s-field" data-key-for="openai"><span>OpenAI</span><input id="key-openai" type="password" placeholder="sk-..." autocomplete="off" /></div>
         <div class="s-field" data-key-for="anthropic"><span>Anthropic</span><input id="key-anthropic" type="password" placeholder="sk-ant-..." autocomplete="off" /></div>
+        <!-- Not a secret, so it is a plain text field: it identifies a workspace,
+             it does not authenticate to one. `data-optional` keeps it out of the
+             "this credential is missing" highlight — an empty workspace id is
+             the normal case, and flagging it would send users hunting for a
+             value most keys never need. -->
+        <div class="s-field" data-key-for="anthropic" data-optional><span>Workspace</span><input id="anthropic-workspace-id" type="text" placeholder="only for identity-linked keys" autocomplete="off" spellcheck="false" /></div>
         <div class="s-field" data-key-for="gemini"><span>Gemini</span><input id="key-gemini" type="password" placeholder="AIza..." autocomplete="off" /></div>
         <div class="s-field" data-key-for="deepgram"><span>Deepgram</span><input id="key-deepgram" type="password" placeholder="dg-..." autocomplete="off" /></div>
         <div class="s-field" data-key-for="custom"><span>Custom</span><input id="key-custom" type="password" placeholder="optional" autocomplete="off" /></div>

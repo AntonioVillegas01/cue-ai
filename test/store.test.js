@@ -88,3 +88,33 @@ test('still rejects a bad Base URL typed into Settings', () => {
   // surface the error rather than being silently dropped.
   assert.throws(() => store.setSettings({ baseUrl: 'ftp://example.com' }), /HTTP or HTTPS/);
 });
+
+// ── Anthropic workspace id ─────────────────────────────────────────────────
+// This value leaves the process as an HTTP header rather than as a body field,
+// and it arrives from the renderer, so it is reduced to the characters an id
+// can actually contain.
+
+test('a workspace id keeps the characters an id is made of', () => {
+  const { normalizeWorkspaceId } = require('../src/store');
+  assert.equal(normalizeWorkspaceId('wrkspc_01ABCdef-99'), 'wrkspc_01ABCdef-99');
+  assert.equal(normalizeWorkspaceId('  wrkspc_01ABC  '), 'wrkspc_01ABC');
+});
+
+test('a workspace id cannot smuggle a second header', () => {
+  const { normalizeWorkspaceId } = require('../src/store');
+  // CRLF injection is the reason this is sanitized rather than trimmed.
+  assert.equal(normalizeWorkspaceId('wrkspc_01\r\nx-api-key: leaked'), 'wrkspc_01x-api-keyleaked');
+  for (const value of ['a\nb', 'a\rb', 'a b', 'a:b', 'a\u0000b']) {
+    const out = normalizeWorkspaceId(value);
+    assert.ok(!/[\s:\u0000]/.test(out), `control or separator survived in ${JSON.stringify(out)}`);
+  }
+});
+
+test('a non-string or oversized workspace id is reduced to something safe', () => {
+  const { normalizeWorkspaceId, MAX_WORKSPACE_ID_CHARS } = require('../src/store');
+  assert.equal(normalizeWorkspaceId(null), '');
+  assert.equal(normalizeWorkspaceId(undefined), '');
+  assert.equal(normalizeWorkspaceId(42), '');
+  assert.equal(normalizeWorkspaceId({}), '');
+  assert.equal(normalizeWorkspaceId('w'.repeat(500)).length, MAX_WORKSPACE_ID_CHARS);
+});

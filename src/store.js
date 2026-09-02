@@ -51,6 +51,11 @@ const DEFAULTS = {
   minimaxRegion: 'global_en',
   apiKeys: { openai: '', anthropic: '', gemini: '', deepgram: '', custom: '', ollama: '', groq: '', minimax: '' , azure: '' },
   azureEndpoint: '',
+  // Anthropic workspace id. Required only for identity-linked API keys, which
+  // reject every request with a 400 until the `anthropic-workspace-id` header
+  // names the workspace the call acts in. Empty for an ordinary key, and the
+  // header is then omitted entirely rather than sent blank.
+  anthropicWorkspaceId: '',
   // Tab 2: Profile
   resumeText: '',
   jobDescription: '',
@@ -113,8 +118,20 @@ function deepMerge(base, over) {
 // Applied on read as well as on write: a settings file written by an older
 // build, or hand-edited, must not be able to hand a bad geometry or font size
 // to BrowserWindow and the renderer.
+// This one value leaves the process as an HTTP *header*, not as a body field,
+// and it arrives from the renderer — which the codebase treats as untrusted.
+// A stray newline would either break the request or, on a less careful client,
+// append a header of the attacker's choosing, so the value is reduced to the
+// characters an id can actually contain rather than merely trimmed.
+const MAX_WORKSPACE_ID_CHARS = 128;
+function normalizeWorkspaceId(value) {
+  if (typeof value !== 'string') return '';
+  return value.trim().replace(/[^A-Za-z0-9_-]/g, '').slice(0, MAX_WORKSPACE_ID_CHARS);
+}
+
 function normalize(settings) {
   settings.baseUrl = normalizeBaseUrl(settings.baseUrl);
+  settings.anthropicWorkspaceId = normalizeWorkspaceId(settings.anthropicWorkspaceId);
   settings.codeFontSize = clampCodeFontSize(settings.codeFontSize);
   settings.windowX = normalizeCoordinate(settings.windowX);
   settings.windowY = normalizeCoordinate(settings.windowY);
@@ -138,6 +155,8 @@ function save() { try { fs.writeFileSync(FILE, JSON.stringify(data, null, 2)); }
 
 module.exports = {
   MAX_AI_RULES_CHARS,
+  MAX_WORKSPACE_ID_CHARS,
+  normalizeWorkspaceId,
   MIN_CODE_FONT_SIZE,
   MAX_CODE_FONT_SIZE,
   clampCodeFontSize,

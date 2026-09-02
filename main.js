@@ -3,6 +3,7 @@ const path = require('path');
 const os = require('os');
 const store = require('./src/store');
 const { captureScreenshot } = require('./src/screen');
+const { createCaptureSession } = require('./src/capture-session');
 const { createSTT } = require('./src/stt');
 const { parseDocumentFile } = require('./src/resume');
 const { createLLM, DEFAULT_MODELS } = require('./src/llm');
@@ -33,7 +34,7 @@ let win = null;
 // false when another application already owns the combination, and nothing used
 // to look at that — so the only symptom was a key that did nothing. Iris reads
 // this and can say which key is taken instead of guessing from a screenshot.
-const shortcutState = { assist: false, say: false, leetcode: false, refactor: false, quit: false };
+const shortcutState = { assist: false, say: false, leetcode: false, refactor: false, tests: false, capture: false, solveCaptures: false, testCaptures: false, refactorCaptures: false, quit: false };
 const isMac = process.platform === 'darwin';
 const isWindows = process.platform === 'win32';
 
@@ -58,6 +59,9 @@ const transcript = []; // { channel, text, ts } — capped at MAX_TRANSCRIPT_TUR
 // What the model already said this session, so "now make it O(n)" has something
 // to refer to. Scoped so coding help and interview help never mix — see src/conversation.js.
 const conversation = new ConversationMemory();
+// Screenshots staged for one scrolled coding challenge. Empty for the ordinary
+// one-shot flow, which still captures at the moment the answer is asked for.
+const captureSession = createCaptureSession();
 // The last mode that actually produced an answer. `continue` borrows its system
 // prompt, so a resumed LeetCode solution stays under the LeetCode rules.
 let lastAnsweredMode = null;
@@ -532,6 +536,101 @@ async function setCapturing(active) {
   return false;
 }
 
+// -------- multi-capture session --------
+// A coding exercise longer than the screen cannot be answered from one
+// screenshot. The user scrolls and stages a capture at each position, then asks
+// for the answer once. See src/capture-session.js for the staging rules and
+// src/prompts.js `scrollNote` for how the overlap is reconciled.
+
+const CAPTURE_ACCELERATOR = 'CommandOrControl+Alt+C';
+// What a staged session can be turned into. Both run an ordinary mode against
+// the captures — `runFeature` already prefers the session over a fresh grab —
+// so this pair is purely about giving the session two advertised exits instead
+// of making the user remember that the single-shot keys also read it.
+const SOLVE_CAPTURES_ACCELERATOR = 'CommandOrControl+Alt+P';
+const TEST_CAPTURES_ACCELERATOR = 'CommandOrControl+Alt+T';
+const REFACTOR_CAPTURES_ACCELERATOR = 'CommandOrControl+Alt+R';
+// Human-readable forms for the status line, so the user is told the key they
+// actually pressed rather than Electron's accelerator syntax.
+const CAPTURE_KEYS = isMac ? '⌘⌥C' : 'Ctrl+Alt+C';
+const SOLVE_KEYS = isMac ? '⌘⌥P' : 'Ctrl+Alt+P';
+const TEST_KEYS = isMac ? '⌘⌥T' : 'Ctrl+Alt+T';
+const REFACTOR_KEYS = isMac ? '⌘⌥R' : 'Ctrl+Alt+R';
+
+// Escape is registered only while captures are staged. A *global* Escape held
+// for the whole session would swallow the key in every other application —
+// closing a dialog, leaving vim's insert mode — so it exists exactly as long as
+// there is something for it to cancel.
+let escapeRegistered = false;
+function syncCaptureEscape() {
+  const wanted = captureSession.count > 0;
+  if (wanted === escapeRegistered) return;
+  if (wanted) {
+    escapeRegistered = globalShortcut.register('Escape', () => clearCaptureSession());
+    if (!escapeRegistered) {
+      recordEvent({ level: 'warn', event: 'shortcut_unavailable', msg: 'another application holds Escape', frame: 'syncCaptureEscape', context: { shortcut: 'cancelCaptures' } });
+    }
+  } else {
+    globalShortcut.unregister('Escape');
+    escapeRegistered = false;
+  }
+}
+
+function screenCaptureMessage() {
+  return process.platform === 'darwin'
+    ? 'Screen capture needs permission — grant Screen Recording to cue in System Settings.'
+    : process.platform === 'win32'
+      ? 'Screen capture failed. Make sure cue is not blocked by Windows privacy or security software, then try again.'
+      : 'Screen capture failed. Check your desktop capture permissions, then try again.';
+}
+
+// Tells the renderer how many captures are staged so the panel can show a
+// counter; the count is the whole payload — the images never leave main.
+function sendCaptureState() {
+  send('capture:shots', { count: captureSession.count, max: captureSession.max });
+}
+
+async function addCapture() {
+  let shot = null;
+  try {
+    shot = await captureScreenshot();
+    if (!shot) throw new Error('No screen source was available.');
+  } catch (e) {
+    recordEvent({ level: 'error', event: 'screen_capture_failed', msg: e && e.message ? e.message : String(e), frame: 'addCapture', context: { staged: captureSession.count } });
+    send('status', { message: screenCaptureMessage() });
+    return;
+  }
+
+  const result = captureSession.add(shot);
+  if (!result.added) {
+    const message = result.reason === 'full'
+      ? `That is already ${captureSession.max} captures — the most cue sends at once. ` +
+        `${SOLVE_KEYS} solve · ${TEST_KEYS} tests · ${REFACTOR_KEYS} refactor · Esc start over`
+      : result.reason === 'duplicate'
+        ? `Same screen as the last capture — still ${result.count}. Scroll first, then press ${CAPTURE_KEYS} again.`
+        : 'That capture came back empty. Try again.';
+    send('status', { message });
+    return;
+  }
+
+  sendCaptureState();
+  syncCaptureEscape();
+  // A delimited list rather than a sentence: with four exits the prose form ran
+  // past the width of the status line and buried the last option.
+  send('status', {
+    message: `Capture ${result.count} saved. Scroll, then ${CAPTURE_KEYS} add · ` +
+      `${SOLVE_KEYS} solve · ${TEST_KEYS} tests · ${REFACTOR_KEYS} refactor · Esc discard`
+  });
+}
+
+function clearCaptureSession(options = {}) {
+  if (!captureSession.clear()) return false;
+  sendCaptureState();
+  syncCaptureEscape();
+  if (!options.quiet) send('status', { message: 'Captures discarded.' });
+  return true;
+}
+
 // -------- feature runner --------
 async function runFeature(mode, userText) {
   if (state.busy) return;
@@ -554,20 +653,24 @@ async function runFeature(mode, userText) {
       return;
     }
 
-    let imageDataUrl = null;
+    // Staged captures win over a fresh grab: if the user scrolled through a long
+    // problem to collect them, capturing the screen again would answer about
+    // whatever happens to be visible now — the bottom of the problem — and
+    // silently throw the rest away.
+    let images = [];
     if (def.needsScreen) {
-      try {
-        imageDataUrl = await captureScreenshot();
-        if (!imageDataUrl) throw new Error('No screen source was available.');
-      }
-      catch (e) {
-        recordEvent({ level: 'error', event: 'screen_capture_failed', msg: e && e.message ? e.message : String(e), frame: 'captureScreenshot', context: { mode } });
-        const message = process.platform === 'darwin'
-          ? 'Screen capture needs permission — grant Screen Recording to cue in System Settings.'
-          : process.platform === 'win32'
-            ? 'Screen capture failed. Make sure cue is not blocked by Windows privacy or security software, then try again.'
-            : 'Screen capture failed. Check your desktop capture permissions, then try again.';
-        send('status', { message });
+      if (captureSession.count) {
+        images = captureSession.list();
+      } else {
+        try {
+          const shot = await captureScreenshot();
+          if (!shot) throw new Error('No screen source was available.');
+          images = [shot];
+        }
+        catch (e) {
+          recordEvent({ level: 'error', event: 'screen_capture_failed', msg: e && e.message ? e.message : String(e), frame: 'captureScreenshot', context: { mode } });
+          send('status', { message: screenCaptureMessage() });
+        }
       }
     }
 
@@ -579,7 +682,7 @@ async function runFeature(mode, userText) {
     const systemDef = MODES[systemMode];
     const contextBlock = buildInterviewContext(settingsForPrompt, systemMode, transcript);
     const system = systemDef.buildSystem ? systemDef.buildSystem(contextBlock, settingsForPrompt.aiRules || '') : (systemDef.system || '');
-    const built = def.build({ transcript, userText: userText || '' });
+    const built = def.build({ transcript, userText: userText || '', shots: images.length });
     const priorTurns = conversation.enter(def.memoryScope || 'interview');
 
     // Watchdog: a provider that stalls mid-stream would otherwise hang the await forever,
@@ -600,7 +703,7 @@ async function runFeature(mode, userText) {
     const streamParams = {
       system,
       turns: [...priorTurns, { role: 'user', text: built }],
-      imageDataUrl,
+      imageDataUrls: images,
       onToken: (t) => { if (streamSettled) return; rearm(); send('llm:token', { text: t }); },
       onTruncated: () => { truncated = true; }
     };
@@ -621,6 +724,10 @@ async function runFeature(mode, userText) {
     // stays strictly alternating for providers that require it.
     conversation.record(built, answer);
     lastAnsweredMode = systemMode;
+    // The staged captures have been answered, so the session is spent. Cleared
+    // only on success: if the provider errored, the user retries the same key
+    // rather than scrolling the whole problem again.
+    if (images.length) clearCaptureSession({ quiet: true });
     send('llm:done', { truncated, exchanges: conversation.exchanges });
   } catch (e) {
     recordEvent({ level: 'error', event: 'llm_failed', msg: e && e.message ? e.message : String(e), frame: 'runFeature', context: { mode, provider: store.getSettings().provider } });
@@ -646,6 +753,11 @@ ipcMain.handle('capture:toggle', () => {
   return captureTransition;
 });
 ipcMain.handle('capture:state', () => ({ active: state.capturing }));
+// Multi-capture session. `capture:add` exists so the panel can offer the same
+// action as the shortcut when another app has taken the key.
+ipcMain.handle('capture:add', async () => { await addCapture(); return captureSession.count; });
+ipcMain.handle('capture:clear', () => { clearCaptureSession(); return captureSession.count; });
+ipcMain.handle('capture:shots', () => ({ count: captureSession.count, max: captureSession.max }));
 ipcMain.handle('whisper:models', () => getWhisperOverview());
 ipcMain.handle('whisper:model-download', async (_event, modelId) => {
   if (!whisperModelManager) throw new Error('The local Whisper model manager is not ready.');
@@ -781,6 +893,15 @@ function registerShortcuts() {
   // Note: this is a *global* shortcut, so while cue is running it takes
   // Cmd/Ctrl+R away from every other app — browser reload included.
   shortcutState.refactor = globalShortcut.register('CommandOrControl+R', () => runFeature('refactor', ''));
+  // Same caveat as the line above: a *global* shortcut, so while cue runs it
+  // takes Cmd/Ctrl+T away from every other app — "new tab" included.
+  shortcutState.tests = globalShortcut.register('CommandOrControl+T', () => runFeature('tests', ''));
+  // Multi-capture: stage a screenshot per scroll position, then solve them as
+  // one problem. Escape is registered on demand — see syncCaptureEscape.
+  shortcutState.capture = globalShortcut.register(CAPTURE_ACCELERATOR, () => { addCapture(); });
+  shortcutState.solveCaptures = globalShortcut.register(SOLVE_CAPTURES_ACCELERATOR, () => runFeature('leetcode', ''));
+  shortcutState.testCaptures = globalShortcut.register(TEST_CAPTURES_ACCELERATOR, () => runFeature('tests', ''));
+  shortcutState.refactorCaptures = globalShortcut.register(REFACTOR_CAPTURES_ACCELERATOR, () => runFeature('refactor', ''));
   shortcutState.hide = globalShortcut.register('CommandOrControl+Shift+/', () => send('hide:toggle', {}));
   shortcutState.quit = globalShortcut.register('CommandOrControl+Shift+X', () => app.quit());
   for (const [name, wasRegistered] of Object.entries(shortcutState)) {
