@@ -79,7 +79,21 @@ html, body {
   cursor: grab;
   -webkit-app-region: drag;
 }
+/* `-webkit-app-region` is NOT an inherited property in Chromium: a child with
+   no rule of its own computes to `none`, which is not draggable. So the pill's
+   label and dot grid were dead holes in the middle of the very control labelled
+   "Drag" — only its few pixels of padding actually moved the window, and the
+   centre did nothing. Every descendant has to opt in explicitly.
+   Buttons and their contents are deliberately left out: they must stay
+   clickable, and line 57 already marks them no-drag. */
+.drag-pill, .drag-pill *, .tb-divider { -webkit-app-region: drag; }
 .drag-pill:hover { background: rgba(255,255,255,0.10); }
+/* While the window is actually moving. An app-region element never receives a
+   mousedown — the OS takes the gesture — so `:active` cannot be relied on and
+   main.js drives this class off the window's own move events. Applied at the
+   root so the cursor stays closed wherever the pointer ends up over the panel. */
+html.window-dragging, html.window-dragging * { cursor: grabbing !important; }
+.drag-pill:active { cursor: grabbing; }
 .drag-dots {
   width: 14px; height: 10px;
   display: inline-block;
@@ -147,7 +161,37 @@ html, body {
 .mic-perm-actions button.dismiss:hover { background: rgba(255,255,255,0.10); color: var(--tx-2); }
 
 /* ============================ Panel ============================ */
-#panel-wrap { position: relative; margin-top: 12px; width: min(624px, 94vw); }
+/* 1100px rather than 624: the panel has to be able to grow when the user
+   resizes the window, or the grip would move the window and change nothing
+   visible. 94vw still binds below a ~1170px-wide window, which is where the
+   panel actually lives, so the default look is unchanged. */
+#panel-wrap { position: relative; margin-top: 12px; width: min(1100px, 94vw); }
+
+/* ---- Resize grip ---- */
+/* Sits on the panel's bottom-right corner because that is the only corner the
+   user can see: the window itself is transparent and its real edges are
+   invisible and click-through. */
+#resize-grip {
+  position: absolute; right: -1px; bottom: -9px;
+  width: 20px; height: 20px;
+  cursor: nwse-resize;
+  -webkit-app-region: no-drag;
+  opacity: 0.30;
+  transition: opacity 140ms ease;
+  background-image: repeating-linear-gradient(
+    -45deg,
+    rgba(255,255,255,0.85) 0 1.5px,
+    transparent 1.5px 4px
+  );
+  /* Fade the stripes into the corner so it reads as a grip, not a swatch. */
+  -webkit-mask-image: linear-gradient(-45deg, #000 42%, transparent 72%);
+  mask-image: linear-gradient(-45deg, #000 42%, transparent 72%);
+}
+#resize-grip:hover { opacity: 0.75; }
+html.window-resizing #resize-grip { opacity: 0.9; }
+/* Keep the resize cursor over the whole window while a resize is in flight,
+   even when the pointer runs ahead of the window edge. */
+html.window-resizing, html.window-resizing * { cursor: nwse-resize !important; }
 button:focus { outline: none; }
 #live-dot {
   position: absolute; top: -3px; left: -5px; z-index: 4;
@@ -166,11 +210,39 @@ button:focus { outline: none; }
   border-radius: var(--r-panel);
   box-shadow: 0 16px 48px rgba(0,0,0,0.45), 0 2px 8px rgba(0,0,0,0.30), inset 0 1px 0 rgba(255,255,255,0.10);
 }
-#panel { padding: 20px 22px; animation: overlayIn 260ms cubic-bezier(0.22,1,0.36,1); }
+#panel {
+  padding: 20px 22px; animation: overlayIn 260ms cubic-bezier(0.22,1,0.36,1);
+  /* Bounded by the window, minus the toolbar above it, so the panel can never
+     push its own composer (or the resize grip) off the bottom edge. */
+  display: flex; flex-direction: column; min-height: 0;
+  max-height: calc(100vh - 80px);
+}
 #panel.collapsed { display: none; }
 
 /* ============================ Messages ============================ */
-#messages { display: flex; flex-direction: column; overflow-y: auto; max-height: 50vh; }
+/* A coding solution is the longest thing cue produces, so the answer pane gets
+   as much room as the window can spare — but never more.
+   The chrome around it (toolbar, panel padding, action row, composer, prep
+   status) measures 316px, so `100vh - 340px` keeps everything on screen with a
+   little slack for a composer grown by a multi-line question. A plain `vh` cap
+   cannot do this: at a 600px window even the old 50vh pushed the prep-status
+   row off the bottom edge, and 62vh pushed the composer to the very edge.
+   The 62vh half only bites on a tall window, where unlimited growth would put
+   the composer an awkward distance from the answer. */
+#messages {
+  display: flex; flex-direction: column; overflow-y: auto;
+  /* Takes whatever the panel has left after the action row, composer and prep
+     status, and shrinks when they need more — e.g. when the action row wraps
+     to a second line on a narrow window. This replaced a hardcoded
+     `calc(100vh - 340px)`, which had to guess the height of everything else
+     and was wrong the moment a fifth action button was added.
+     The 62vh cap only bites on a tall window, where letting the answer grow
+     without limit would strand the composer far from the text. */
+  flex: 1 1 auto;
+  min-height: 90px;
+  max-height: 62vh;
+  scroll-behavior: auto;
+}
 .user-bubble {
   align-self: flex-end;
   max-width: 75%;
@@ -199,9 +271,63 @@ button:focus { outline: none; }
   padding: 12px 14px;
   overflow-x: auto;
   font-family: var(--mono);
-  font-size: 13px; line-height: 1.5;
+  /* Set from settings.codeFontSize — reading code off a translucent overlay
+     is not the same as reading it in an editor. */
+  font-size: var(--code-fs, 13px); line-height: 1.5;
   margin: 12px 0;
 }
+
+/* ---- Code block chrome: language label + copy ---- */
+.code-block { position: relative; margin: 12px 0; }
+.code-block > pre { margin: 0; border-top-left-radius: 0; border-top-right-radius: 0; }
+.code-head {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; padding: 5px 10px 5px 12px;
+  background: rgba(0,0,0,0.45);
+  border: 1px solid rgba(255,255,255,0.08); border-bottom: none;
+  border-radius: 10px 10px 0 0;
+}
+.code-lang {
+  font-family: var(--mono); font-size: 11px; letter-spacing: 0.04em;
+  text-transform: uppercase; color: var(--tx-mut);
+}
+.code-copy {
+  display: inline-flex; align-items: center; gap: 5px;
+  border: none; background: transparent; cursor: pointer;
+  color: rgba(255,255,255,0.55); font-size: 11.5px; font-weight: 500;
+  padding: 3px 7px; border-radius: 6px;
+  transition: background 140ms ease, color 140ms ease;
+  -webkit-app-region: no-drag;
+}
+.code-copy:hover { background: rgba(255,255,255,0.09); color: #fff; }
+.code-copy.copied { color: var(--live, #22c55e); }
+
+/* ---- Cut-off answer notice ---- */
+.trunc-note {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: 10px 0 2px; padding: 8px 12px; border-radius: 10px;
+  background: rgba(245,158,11,0.12); border: 1px solid rgba(245,158,11,0.32);
+  color: #f2c48b; font-size: 12.5px; line-height: 1.45;
+}
+.trunc-note button {
+  border: 1px solid rgba(245,158,11,0.45); background: rgba(245,158,11,0.16);
+  color: #ffdcae; font-size: 12px; font-weight: 600;
+  padding: 4px 10px; border-radius: 7px; cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+.trunc-note button:hover { background: rgba(245,158,11,0.26); }
+/* ---- Syntax highlighting (renderer/highlight.js) ----
+   Restrained on purpose: the panel is a translucent overlay sitting on top of
+   the user's real screen, so saturated colours fight the background. Comments
+   are dimmed rather than tinted, because in a solution written for reading
+   aloud the numbered steps should guide the eye without shouting. */
+.ai-text .tok-com { color: rgba(255,255,255,0.42); font-style: italic; }
+.ai-text .tok-str { color: #9ed7a8; }
+.ai-text .tok-num { color: #f0b678; }
+.ai-text .tok-kw  { color: #c39bec; }
+.ai-text .tok-fn  { color: #82aaff; }
+.ai-text .tok-type { color: #7fd1c8; }
+
 .ai-text code { font-family: var(--mono); font-size: 0.92em; }
 .ai-text p code { background: rgba(255,255,255,0.10); padding: 1px 5px; border-radius: 5px; }
 .ai-caret { display:inline-block; width:7px; height:1.05em; vertical-align:-2px; background: var(--accent); border-radius:1px; animation: blink 1s step-end infinite; margin-left: 2px; }
@@ -233,8 +359,11 @@ button:focus { outline: none; }
 }
 
 /* ============================ Action row ============================ */
+/* Wraps rather than overflows. With five actions the row no longer fits a
+   700px window on one line, and `nowrap` silently pushed Recap outside the
+   panel instead of moving it to a second line. */
 #action-row {
-  display: flex; align-items: center; flex-wrap: nowrap; gap: 4px;
+  display: flex; align-items: center; flex-wrap: wrap; gap: 4px 4px;
   margin-top: 6px; white-space: nowrap;
 }
 .act {
@@ -444,6 +573,17 @@ button:focus { outline: none; }
 .history-btn.listening { color: var(--live); }
 .history-btn.listening.active { color: var(--live); background: rgba(34,197,94,0.12); }
 
+/* Small composer utilities: code text size, start fresh */
+.icon-btn {
+  width: 28px; height: 28px; border-radius: var(--r-8);
+  border: none; background: transparent; color: rgba(255,255,255,0.5);
+  cursor: pointer; display: inline-flex; align-items: center; justify-content: center;
+  transition: background 140ms ease, color 140ms ease;
+  -webkit-app-region: no-drag;
+}
+.icon-btn:hover { background: rgba(255,255,255,0.08); color: rgba(255,255,255,0.85); }
+.icon-btn.hidden { display: none; }
+
 .more-btn {
   width: 28px; height: 28px; border-radius: var(--r-8);
   border: none; background: transparent; color: rgba(255,255,255,0.7);
@@ -502,6 +642,19 @@ button:focus { outline: none; }
 .s-field input { flex: 1; padding: 8px 10px; border-radius: var(--r-8); border: 1px solid rgba(255,255,255,0.14); background: rgba(0,0,0,0.25); color: var(--tx-1); font-size: 13px; font-family: var(--font); outline: none; }
 .s-field input:focus { border-color: var(--accent); }
 .s-help { color: var(--tx-mut); font-size: 11px; line-height: 1.4; margin: 4px 0 2px 88px; }
+.s-help:empty { display: none; }
+
+/* The credential the selected provider actually uses. Nine key rows in a flat
+   list gave no clue which one the active provider reads, which is how a key
+   ends up in the right app and the wrong field. */
+.s-field.is-active span { color: var(--tx-2); font-weight: 600; }
+.s-field.is-active input { border-color: rgba(60,131,245,0.55); background: rgba(60,131,245,0.07); }
+.s-field.is-active input:focus { border-color: var(--accent); }
+/* Missing credential for the provider that is currently selected: the one
+   state where the app cannot answer anything at all. */
+.s-field.is-missing span { color: #f2c48b; }
+.s-field.is-missing input { border-color: rgba(245,158,11,0.55); background: rgba(245,158,11,0.07); }
+.s-help.is-missing { color: #f2c48b; }
 .s-select {
   width: 100%; padding: 8px 10px; border-radius: var(--r-8);
   border: 1px solid rgba(255,255,255,0.14); background: #17191f;
@@ -594,14 +747,23 @@ button:focus { outline: none; }
 .ob-primary:hover { filter: brightness(1.08); }
 
 /* ============================ Two-column panel layout ============================ */
+/* The height chain that lets the answer pane take exactly the space left over.
+   `min-height: 0` at every level is what allows a flex child to shrink below
+   its content — without it the panel just overflows the window, which is what
+   the old fixed `vh` cap on #messages was working around. */
 #panel-columns {
   display: flex;
   gap: 0;
-  align-items: flex-start;
+  align-items: stretch;
+  min-height: 0;
+  flex: 1 1 auto;
 }
 #panel-main {
   flex: 1;
-  min-width: 0; /* allow shrink */
+  min-width: 0;  /* allow shrink */
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 /* Transcript history sidebar — floats OUTSIDE the main panel */

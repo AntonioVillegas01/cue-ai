@@ -15,6 +15,8 @@ Electron overlay (~6.7k LOC, no build step, no framework, no bundler). `npm star
 | **preload** | `preload.js` | the *entire* API surface the UI can reach (`window.cue`) |
 | **renderer** | `renderer/*` | UI only. No node, no keys used directly, `contextIsolation: true` |
 
+Renderer scripts load in order as plain `<script>` tags — no bundler. `icons.js` (`window.ICONS`) and `highlight.js` (`window.HIGHLIGHT`, also a CommonJS module so its escaping is unit-tested) must come before `renderer.js`.
+
 Audio is captured **in the renderer** (`getUserMedia` for mic, `getDisplayMedia` loopback for system audio) so it runs under cue's own Screen-Recording grant, then shipped to main as raw PCM over IPC (`mic:pcm` / `system:pcm`).
 
 ## Where things live
@@ -25,7 +27,8 @@ Audio is captured **in the renderer** (`getUserMedia` for mic, `getDisplayMedia`
 - `src/stt-streaming.js` — WebSocket STT (OpenAI Realtime, Deepgram Nova).
 - `src/local-whisper-transcriber.js` + `src/whisper-server-session.js` — offline path: spawns `whisper-server` on 127.0.0.1 with a random URL path, feeds it segmented utterances. Nothing leaves the machine on this path.
 - `src/whisper-model-manager.js` + `src/whisper-model-catalog.js` — model downloads, SHA-256 + size pinned.
-- `src/prompts.js` — `MODES`: one entry per feature (`assist`, `say`, `followup`, `recap`, `ask`, `answerThis`, `leetcode`). Each has `needsScreen`, `buildSystem(contextBlock, aiRules)`, `build({transcript, userText})`.
+- `src/prompts.js` — `MODES`: one entry per feature (`assist`, `say`, `followup`, `recap`, `ask`, `answerThis`, `leetcode`, `continue`). Each has `needsScreen`, `buildSystem(contextBlock, aiRules)`, `build({transcript, userText})`, and optionally `maxTokens: {fast, smart}`, `memoryScope`, `inheritSystemFromLastMode`.
+- `src/conversation.js` — the last few exchanges, so a follow-up ("now make it O(n)") has something to refer to. Scoped: `coding` and `interview` never mix, `any` adopts whichever is open. Switching scope clears rather than blends.
 - `src/interview-context.js` — detects question category from the transcript, injects only relevant profile fields.
 - `src/store.js` — JSON settings file in `app.getPath('userData')/cue-data.json`. `DEFAULTS` is the schema.
 - `src/applink.js` + `vendor/app-link/` — local Unix-socket/named-pipe server so an external assistant can ask cue about its state. **`vendor/app-link` is vendored; do not edit it here** (upstream: publik repo, `packages/app-link`).

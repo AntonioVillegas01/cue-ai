@@ -352,7 +352,11 @@ function createLLM(settings) {
     }
   } else if (provider !== 'ollama' && !apiKey) {
     // Ollama is a local server: the field holds a URL, and no key is required.
-    configurationError = `Add your ${provider} API key in Settings.`;
+    // Note: cue reads the key from its own Settings only — it does not pick up
+    // GEMINI_API_KEY or any other environment variable, and saying so here is
+    // cheaper than the user discovering it by guesswork.
+    configurationError = `Add your ${normalizeProviderName(provider)} API key in Settings → Keys. ` +
+      `cue does not read API keys from environment variables or a .env file.`;
   }
 
   // Azure needs a second credential: the resource endpoint.
@@ -396,6 +400,8 @@ function createLLM(settings) {
 
 module.exports = {
   createLLM,
+  DEFAULT_MODELS,
+  normalizeProviderName,
   formatProviderErrorMessage,
   isQuotaError,
   resolveMaxTokens,

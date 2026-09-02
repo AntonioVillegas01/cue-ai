@@ -21,11 +21,21 @@ function clampCodeFontSize(value, fallback = DEFAULTS.codeFontSize) {
   return Math.min(MAX_CODE_FONT_SIZE, Math.max(MIN_CODE_FONT_SIZE, size));
 }
 
-// Window geometry arrives from the renderer and from a JSON file on disk, so a
-// non-numeric value has to degrade to "unset" rather than reach BrowserWindow.
-function normalizeDimension(value) {
+// Window geometry arrives from a JSON file on disk, so a non-numeric value has
+// to degrade to "unset" rather than reach BrowserWindow.
+//
+// `null` is the documented "never positioned" value and must survive as null:
+// Number(null) is 0, so a naive coercion would silently turn a fresh install
+// into a window pinned to the top-left corner instead of a centred one.
+function normalizeCoordinate(value) {
+  if (value === null || value === undefined || value === '') return null;
   const number = Math.round(Number(value));
-  return Number.isFinite(number) && number > 0 ? number : null;
+  return Number.isFinite(number) ? number : null;
+}
+
+function normalizeDimension(value) {
+  const number = normalizeCoordinate(value);
+  return number !== null && number > 0 ? number : null;
 }
 
 const DEFAULTS = {
@@ -106,8 +116,8 @@ function deepMerge(base, over) {
 function normalize(settings) {
   settings.baseUrl = normalizeBaseUrl(settings.baseUrl);
   settings.codeFontSize = clampCodeFontSize(settings.codeFontSize);
-  settings.windowX = Number.isFinite(Number(settings.windowX)) ? Math.round(Number(settings.windowX)) : null;
-  settings.windowY = Number.isFinite(Number(settings.windowY)) ? Math.round(Number(settings.windowY)) : null;
+  settings.windowX = normalizeCoordinate(settings.windowX);
+  settings.windowY = normalizeCoordinate(settings.windowY);
   settings.windowW = normalizeDimension(settings.windowW);
   settings.windowH = normalizeDimension(settings.windowH);
   return settings;

@@ -49,6 +49,18 @@
                 <span class="shortcut-hint" id="assist-shortcut-hint"></span>
               </button>
               <span class="sep">•</span>
+              <button class="act act-secondary" data-mode="leetcode" id="solve-btn"
+                title="Screenshots the display your cursor is on and solves the coding problem">
+                <span class="ic"></span><span>Solve</span>
+                <span class="shortcut-hint" id="solve-shortcut-hint"></span>
+              </button>
+              <span class="sep">•</span>
+              <button class="act act-secondary" data-mode="refactor" id="refactor-btn"
+                title="Screenshots the display your cursor is on and refactors the code">
+                <span class="ic"></span><span>Refactor</span>
+                <span class="shortcut-hint" id="refactor-shortcut-hint"></span>
+              </button>
+              <span class="sep">•</span>
               <button class="act" data-mode="followup"><span class="ic"></span><span>Follow-up</span></button>
               <span class="sep">•</span>
               <button class="act" data-mode="recap"><span class="ic"></span><span>Recap</span></button>
@@ -61,6 +73,8 @@
               </div>
               <div id="composer-bottom">
                 <button id="smart-toggle" class="smart-pill"><span class="ic"></span><span>Smart</span></button>
+                <button id="code-size-btn" class="icon-btn" title="Code text size"></button>
+                <button id="clear-context-btn" class="icon-btn hidden" title="Start fresh — forget the previous answers in this thread"></button>
                 <button id="history-btn" class="history-btn" title="View conversation history"><span class="ic"></span></button>
                 <button id="more-btn" class="more-btn" title="Settings"></button>
                 <div class="spacer"></div>
@@ -78,6 +92,9 @@
 
         </div><!-- /panel-columns -->
       </div>
+      <!-- The window's own resize edges are unreachable in an overlay (every
+           empty pixel is click-through), so resizing hangs off this grip. -->
+      <div id="resize-grip" title="Drag to resize the window"></div>
     </div>
 
     <!-- Transcript history sidebar — floats OUTSIDE main panel, toggled by history button -->
@@ -127,13 +144,14 @@
           <button data-provider="azure">Azure AI</button>
         </div>
 
-        <label class="s-label">API keys &amp; URLs <span class="s-hint">stored locally · never sent to any server</span></label>
-        <div class="s-field"><span>OpenAI</span><input id="key-openai" type="password" placeholder="sk-..." autocomplete="off" /></div>
-        <div class="s-field"><span>Anthropic</span><input id="key-anthropic" type="password" placeholder="sk-ant-..." autocomplete="off" /></div>
-        <div class="s-field"><span>Gemini</span><input id="key-gemini" type="password" placeholder="AIza..." autocomplete="off" /></div>
-        <div class="s-field"><span>Deepgram</span><input id="key-deepgram" type="password" placeholder="dg-..." autocomplete="off" /></div>
-        <div class="s-field"><span>Custom</span><input id="key-custom" type="password" placeholder="optional" autocomplete="off" /></div>
-        <div class="s-field"><span>MiniMax</span><input id="key-minimax" type="password" placeholder="MiniMax API key" autocomplete="off" /></div>
+        <label class="s-label">API keys &amp; URLs <span class="s-hint">stored locally · never sent to any server · not read from .env</span></label>
+        <div class="s-help" id="active-key-help"></div>
+        <div class="s-field" data-key-for="openai"><span>OpenAI</span><input id="key-openai" type="password" placeholder="sk-..." autocomplete="off" /></div>
+        <div class="s-field" data-key-for="anthropic"><span>Anthropic</span><input id="key-anthropic" type="password" placeholder="sk-ant-..." autocomplete="off" /></div>
+        <div class="s-field" data-key-for="gemini"><span>Gemini</span><input id="key-gemini" type="password" placeholder="AIza..." autocomplete="off" /></div>
+        <div class="s-field" data-key-for="deepgram"><span>Deepgram</span><input id="key-deepgram" type="password" placeholder="dg-..." autocomplete="off" /></div>
+        <div class="s-field" data-key-for="custom"><span>Custom</span><input id="key-custom" type="password" placeholder="optional" autocomplete="off" /></div>
+        <div class="s-field" data-key-for="minimax"><span>MiniMax</span><input id="key-minimax" type="password" placeholder="MiniMax API key" autocomplete="off" /></div>
 
         <label class="s-label">MiniMax region <span class="s-hint">keys are region-bound — a Global key will 401 against China, and vice versa</span></label>
         <div class="s-seg" id="minimax-region-seg">
@@ -146,16 +164,17 @@
           <div class="s-field"><span>Base URL</span><input id="base-url" type="url" placeholder="http://127.0.0.1:18789/v1" autocomplete="off" spellcheck="false" /></div>
           <div class="s-help">Your Custom key and LLM requests are sent to this URL. Speech-to-text continues to use Deepgram, OpenAI, or Gemini.</div>
         </div>
-        <div class="s-field"><span>Ollama URL</span><input id="key-ollama" type="text" placeholder="http://localhost:11434" autocomplete="off" /></div>
-        <div class="s-field"><span>Groq</span><input id="key-groq" type="password" placeholder="gsk_..." autocomplete="off" /></div>
-        <div class="s-field"><span>Azure AI Foundry</span><input id="key-azure" type="password" placeholder="azure key or Entra token" autocomplete="off" /></div>
+        <div class="s-field" data-key-for="ollama"><span>Ollama URL</span><input id="key-ollama" type="text" placeholder="http://localhost:11434" autocomplete="off" /></div>
+        <div class="s-field" data-key-for="groq"><span>Groq</span><input id="key-groq" type="password" placeholder="gsk_..." autocomplete="off" /></div>
+        <div class="s-field" data-key-for="azure"><span>Azure AI Foundry</span><input id="key-azure" type="password" placeholder="azure key or Entra token" autocomplete="off" /></div>
 
         <label class="s-label">Azure endpoint <span class="s-hint">Azure OpenAI: https://&lt;resource&gt;.openai.azure.com/openai · AI Foundry: https://&lt;host&gt;.cognitiveservices.azure.com (cue adds /openai/v1)</span></label>
         <div class="s-field"><span>Endpoint</span><input id="azure-endpoint" type="text" placeholder="https://host.cognitiveservices.azure.com" autocomplete="off" /></div>
 
-        <label class="s-label">Models <span class="s-hint">fast = Smart off · smart = Smart on</span></label>
-        <div class="s-field"><span>Fast</span><input id="model-fast" type="text" autocomplete="off" /></div>
-        <div class="s-field"><span>Smart</span><input id="model-smart" type="text" autocomplete="off" /></div>
+        <label class="s-label">Model for <span id="model-provider-name">OpenAI</span> <span class="s-hint">fast = Smart off · smart = Smart on</span></label>
+        <div class="s-field"><span>Fast</span><input id="model-fast" type="text" autocomplete="off" spellcheck="false" /></div>
+        <div class="s-field"><span>Smart</span><input id="model-smart" type="text" autocomplete="off" spellcheck="false" /></div>
+        <div class="s-help" id="model-help"></div>
 
         <label class="s-label">Assistant access <span class="s-hint">programs allowed to see what cue is doing</span></label>
         <div class="s-callers" id="applink-callers"></div>
@@ -301,6 +320,7 @@
   </div>
 
   <script src="icons.js"></script>
+  <script src="highlight.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>

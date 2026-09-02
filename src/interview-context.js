@@ -3,6 +3,10 @@
 // direction an interview can take. Reads the live transcript to detect which
 // category is in play and injects only the fields that are relevant.
 
+// Which modes answer with code and therefore get no personal context at all.
+// Owned by prompts.js so the rule cannot drift between the two files.
+const { CODE_MODES } = require('./prompts');
+
 // ── Question category detection ───────────────────────────────────────────────
 const CATEGORY_PATTERNS = {
   behavioral: [
@@ -163,11 +167,11 @@ function buildJDBlock(jd, limit = 600) {
 /**
  * buildInterviewContext(settings, mode, transcript)
  * Returns a system-prompt string with only the context fields relevant to
- * the detected interview category. Returns null for leetcode mode.
+ * the detected interview category. Returns null for the code modes.
  */
 function buildInterviewContext(settings, mode, transcript) {
   // Coding problems never need personal context
-  if (mode === 'leetcode') return null;
+  if (CODE_MODES.has(mode)) return null;
 
   const category = detectCategory(transcript || []);
 

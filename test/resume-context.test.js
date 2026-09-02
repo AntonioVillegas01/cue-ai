@@ -123,3 +123,25 @@ test('buildInterviewContext: JD tailor note included when JD is set', () => {
   assert.ok(ctx !== null);
   assert.ok(ctx.includes('Tailor'), 'should include tailor note when JD is set');
 });
+
+test('buildInterviewContext: code modes get no personal context at all', () => {
+  // A refactor or a solution is judged on the code. Leaking a résumé or a
+  // salary target into that prompt is useless to the answer and a privacy cost
+  // on every screenshot request.
+  const { CODE_MODES } = require('../src/prompts');
+  const settings = {
+    resumeText: 'SECRET RESUME',
+    jobDescription: 'SECRET JD',
+    starStories: 'SECRET STORY',
+    salaryTarget: 'SECRET SALARY'
+  };
+  for (const mode of CODE_MODES) {
+    assert.equal(buildInterviewContext(settings, mode, []), null, `${mode} must get a null context block`);
+  }
+});
+
+test('buildInterviewContext: conversational modes still get their context', () => {
+  // The counterpart: the exclusion above must not have widened to everything.
+  const block = buildInterviewContext({ resumeText: 'Ten years of Node.' }, 'say', []);
+  assert.ok(block && block.includes('Ten years of Node.'));
+});

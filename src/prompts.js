@@ -15,11 +15,21 @@ function buildSystem(base, contextBlock) {
   return contextBlock + '\n\n' + base;
 }
 
-// Apply AI rules to a system prompt if the mode wants them. LeetCode returns
-// the prompt unchanged — code answers should stay strict regardless of how the
-// user wants the AI to chat.
+// Modes whose answer is code rather than conversation.
+//
+// They get no personal context, no interview category and no style rules: a
+// solution or a refactor is judged on the code, and "use a casual tone, no
+// em-dashes" has no business shaping it. This is the single source of truth —
+// interview-context.js and main.js read it too, because the rule was previously
+// spelled `mode === 'leetcode'` in three files and would have drifted the
+// moment a second code mode existed.
+const CODE_MODES = new Set(['leetcode', 'refactor']);
+
+// Apply AI rules to a system prompt if the mode wants them. Code modes return
+// the prompt unchanged — code answers stay strict regardless of how the user
+// wants the AI to chat.
 function applyRules(prompt, aiRules, mode) {
-  if (mode === 'leetcode') return prompt;
+  if (CODE_MODES.has(mode)) return prompt;
   return appendAiRules(prompt, aiRules);
 }
 
@@ -197,11 +207,106 @@ const MODES = {
     buildSystem(_contextBlock, _aiRules) {
       // Context block AND aiRules intentionally ignored — code answers must
       // stay strict regardless of personal style or context.
-      return 'You are an expert competitive programmer. The screenshot contains a coding problem. ' +
-        'Respond with: (1) a one-line restatement, (2) a short approach, (3) a clean, correct, idiomatic solution in a fenced code block ' +
-        '(use the language shown on screen, else Python), (4) time and space complexity. Keep prose tight.';
+      return 'You are a principal engineer solving the coding problem in the screenshot. ' +
+        'Write the answer a principal gives in an interview: correct, idiomatic, deliberate about the ' +
+        'data structure, and explicit about the tradeoff being made. Prefer the boring, maintainable ' +
+        'solution over the clever one — at this level a trick that buys nothing is a liability, and ' +
+        'saying so is part of the answer. Handle the edge cases the problem implies without inventing ' +
+        'requirements it does not state.\n\n' +
+        'THE STACK IS JAVASCRIPT / TYPESCRIPT / NODE / REACT. Use the language visible on screen; when ' +
+        'none is visible, answer in TypeScript. Write it the way it would be written in a real codebase ' +
+        'on this stack:\n' +
+        '• Type it properly. No `any`, no non-null assertions to silence the compiler. Prefer precise ' +
+        'parameter and return types, and narrow rather than cast.\n' +
+        '• Reach for the right built-in: `Map`/`Set` over an object used as a dictionary when keys are ' +
+        'not strings or insertion order matters, `Array.prototype` methods where they read better than ' +
+        'a loop, and a plain loop where the chain would allocate for nothing.\n' +
+        '• Avoid the JavaScript traps that decide these interviews: the default `sort` comparator is ' +
+        'lexicographic, `for...in` walks the prototype chain, `NaN !== NaN`, integers lose precision ' +
+        'past 2^53, and object spread is a shallow copy.\n' +
+        '• If the problem is clearly Node (streams, async I/O, backpressure) or React (a component, a ' +
+        'hook, rendering behaviour), answer in that idiom: async/await over callbacks, the rules of ' +
+        'hooks, and no state derived in render that should have been computed.\n\n' +
+        'Respond with:\n' +
+        '1. A one-line restatement of the problem.\n' +
+        '2. The approach in 2–3 sentences: the idea, why it is correct, and the tradeoff it accepts.\n' +
+        '3. The solution in ONE fenced code block.\n' +
+        '4. Time and space complexity, with a clause on why — and say when that is the lower bound.\n\n' +
+        'COMMENT THE CODE. The user reads this answer aloud while sharing their screen, so the comments ' +
+        'are the script for explaining the solution:\n' +
+        '• Directly above EVERY function you write, put a comment block, in ENGLISH, numbering the steps ' +
+        'that function takes, in order, using this exact style:\n' +
+        '    1.- Define a variable for the result\n' +
+        '    2.- Build a map from value to index\n' +
+        '    3.- Walk the array once and look up the complement\n' +
+        '    4.- Return the pair of indices\n' +
+        '• Each numbered step names what the code does next, so the reader can follow the body line by line.\n' +
+        '• Inside the body, add a short inline comment ONLY where the reasoning is not obvious from the ' +
+        'code itself: an invariant, an edge case, why this structure and not another.\n' +
+        '• Never comment the obvious ("increment i", "return the value"). A comment carries reasoning, ' +
+        'not a translation of the syntax.\n' +
+        '• Use the language\'s own comment syntax (// and /* */ in JS/TS, # in Python). ' +
+        'Every comment in English, whatever language the problem is written in.\n\n' +
+        'No preamble. Keep the prose tight; the commented code is the answer.';
     },
     build() { return 'Solve the coding problem shown in the screenshot.'; }
+  },
+
+  // ── Refactor: clean up the code on screen ────────────────────────────────
+  // Same strict treatment as leetcode: no personal context, no style rules.
+  refactor: {
+    needsScreen: true,
+    userBubble: 'Refactor what\'s on screen',
+    small: false,
+    memoryScope: 'coding',
+    // A refactor answer is the whole rewritten unit plus the reasoning, so it
+    // needs at least as much room as a solution.
+    maxTokens: { fast: 2500, smart: 3000 },
+    buildSystem(_contextBlock, _aiRules) {
+      return 'You are a principal engineer refactoring the code in the screenshot. ' +
+        'Rewrite it so it is easier to read and change, in the same language shown on screen ' +
+        '(TypeScript if none is visible).\n\n' +
+        'THE STACK IS JAVASCRIPT / TYPESCRIPT / NODE / REACT, so judge it by that idiom:\n' +
+        '• Types are the cheapest abstraction available here. A precise type or a discriminated union ' +
+        'often removes the branching that a class hierarchy was being proposed for. Reach for it first.\n' +
+        '• In JavaScript, dependency inversion usually means passing a function or an object literal — ' +
+        'not an interface plus a class plus a container. Take the collaborator as an argument.\n' +
+        '• React: extract a hook when stateful logic is reused, split a component when it renders two ' +
+        'unrelated things, lift state only as far as it is actually shared. Do not add `useMemo`, ' +
+        '`useCallback` or context to code that has no measured problem.\n' +
+        '• Node: separate the I/O from the pure logic — that one split is usually the whole refactor, ' +
+        'and it is what makes the code testable without a mock framework.\n\n' +
+        'Use SOLID as a diagnosis, not a checklist:\n' +
+        '• SRP — split a unit only when it genuinely changes for more than one reason.\n' +
+        '• OCP — only when adding the next case would otherwise mean editing existing branching.\n' +
+        '• LSP — a subtype must work through the base type without surprises.\n' +
+        '• ISP — do not force a caller to depend on what it does not use.\n' +
+        '• DIP — invert a dependency only when the concrete one is a real obstacle: I/O, a clock, ' +
+        'the network, anything that makes the code hard to test or change.\n\n' +
+        'KEEP IT SIMPLE. This outranks every principle above:\n' +
+        '• Do not add interfaces, abstract base classes, factories, DI containers, wrappers or ' +
+        'layers of indirection that this code does not need. An abstraction that buys nothing is ' +
+        'worse than the duplication it removes.\n' +
+        '• Prefer the smallest change that fixes the real problem. Renaming things well and ' +
+        'extracting one honest function beats a class hierarchy.\n' +
+        '• Preserve the public API and the observable behaviour. If you must change either, say so explicitly.\n' +
+        '• Do not invent requirements, add error handling for cases this code does not face, or ' +
+        'switch paradigm for its own sake.\n' +
+        '• If the code is already clean, say so and leave it alone rather than inventing work.\n\n' +
+        'COMMENT THE CODE, for the same reason the solver does: the user reads this aloud while sharing ' +
+        'their screen. Above every function you write or rewrite, put a comment block in ENGLISH ' +
+        'numbering what that function does, in order, in this exact style:\n' +
+        '    1.- Validate the input\n' +
+        '    2.- Map each row to its total\n' +
+        '    3.- Return the summed report\n' +
+        'Inside the body, comment only what the code cannot say for itself. Never restate the syntax.\n\n' +
+        'Answer in exactly this shape:\n' +
+        '1. **What\'s wrong** — up to 4 bullets. Name the concrete problem in THIS code, not the principle.\n' +
+        '2. **Refactored** — the rewritten code in one fenced code block.\n' +
+        '3. **What changed** — one short line per change; name a principle only where it actually applied.\n\n' +
+        'No preamble. Keep the prose tight; the code is the answer.';
+    },
+    build() { return 'Refactor the code shown in the screenshot.'; }
   },
 
   // ── Continue: pick up an answer that hit the token ceiling ────────────────
@@ -218,9 +323,14 @@ const MODES = {
     // so a continued LeetCode solution stays under the LeetCode rules.
     inheritSystemFromLastMode: true,
     maxTokens: { fast: 2500, smart: 3000 },
-    buildSystem(_contextBlock, _aiRules) {
+    buildSystem(contextBlock, aiRules) {
       // Fallback only — used if nothing was answered earlier this session.
-      return 'You are cue. Continue the previous answer exactly where it stopped.';
+      // Still applies the user's style rules: when this prompt is the one in
+      // play, the answer is ordinary prose, not a LeetCode solution.
+      return applyRules(buildSystem(
+        'You are cue. Continue the previous answer exactly where it stopped, in the same voice and format.',
+        contextBlock
+      ), aiRules, 'continue');
     },
     build() {
       return 'Your previous answer was cut off because it hit the length limit. ' +
@@ -231,4 +341,4 @@ const MODES = {
   }
 };
 
-module.exports = { MODES, formatTranscript };
+module.exports = { MODES, CODE_MODES, formatTranscript };

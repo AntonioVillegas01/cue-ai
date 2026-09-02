@@ -1,6 +1,7 @@
 /* cue renderer — UI state, mic capture, IPC, streaming render. */
 (function () {
   const { icon } = window.ICONS;
+  const { highlightCode } = window.HIGHLIGHT;
   const cue = window.cue; // exposed by preload
   const $ = (s) => document.querySelector(s);
   const isWindows = cue.platform === 'win32';
@@ -15,7 +16,11 @@
   document.querySelector('.act[data-mode="say"] .ic').innerHTML = icon('wand-sparkles', { size: 16 });
   document.querySelector('.act[data-mode="followup"] .ic').innerHTML = icon('message-circle', { size: 16 });
   document.querySelector('.act[data-mode="recap"] .ic').innerHTML = icon('refresh-cw', { size: 16 });
+  document.querySelector('.act[data-mode="leetcode"] .ic').innerHTML = icon('code', { size: 16 });
+  document.querySelector('.act[data-mode="refactor"] .ic').innerHTML = icon('wrench', { size: 15 });
   $('#smart-toggle .ic').innerHTML = icon('zap', { size: 14 });
+  $('#code-size-btn').innerHTML = icon('type', { size: 15 });
+  $('#clear-context-btn').innerHTML = icon('eraser', { size: 15 });
   $('#more-btn').innerHTML = icon('more-horizontal', { size: 18 });
   $('#send-btn').innerHTML = icon('play', { size: 15 });
   const clearIC = document.querySelector('#clear-transcript-btn .ic');
@@ -38,27 +43,46 @@
   function renderMarkdown(text) {
     const lines = text.split('\n');
     let html = '', inCode = false, inList = false, buf = [];
+    // Code is buffered rather than emitted line by line so the highlighter can
+    // see the whole block — a docstring or a block comment spans lines.
+    let codeLines = [], codeLang = '';
+    const flushCode = () => {
+      html += highlightCode(codeLines.join('\n'), codeLang) + '</code></pre>';
+      codeLines = []; codeLang = '';
+    };
     const flushP = () => { if (buf.length) { html += '<p>' + inline(buf.join(' ')) + '</p>'; buf = []; } };
     const inline = (s) => esc(s)
       .replace(/`([^`]+)`/g, '<code>$1</code>')
       .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
     for (const raw of lines) {
       const line = raw;
-      if (/^```/.test(line.trim())) {
-        if (!inCode) { flushP(); if (inList) { html += '</ul>'; inList = false; } html += '<pre><code>'; inCode = true; }
-        else { html += '</code></pre>'; inCode = false; }
+      const fence = /^```(\S*)/.exec(line.trim());
+      if (fence) {
+        if (!inCode) {
+          flushP();
+          if (inList) { html += '</ul>'; inList = false; }
+          // The language tag is kept so the block can be labelled and
+          // highlighted; it is escaped like everything else and only ever
+          // lands in an attribute.
+          codeLang = fence[1] || '';
+          const lang = esc(codeLang);
+          html += '<pre' + (lang ? ' data-lang="' + lang + '"' : '') + '><code>';
+          inCode = true;
+        } else { flushCode(); inCode = false; }
         continue;
       }
-      if (inCode) { html += esc(line) + '\n'; continue; }
+      if (inCode) { codeLines.push(line); continue; }
       if (/^\s*[-*]\s+/.test(line)) { flushP(); if (!inList) { html += '<ul>'; inList = true; } html += '<li>' + inline(line.replace(/^\s*[-*]\s+/, '')) + '</li>'; continue; }
       if (line.trim() === '') { flushP(); if (inList) { html += '</ul>'; inList = false; } continue; }
       buf.push(line.trim());
     }
-    flushP(); if (inList) html += '</ul>'; if (inCode) html += '</code></pre>';
+    // An unclosed fence is the normal case mid-stream: close it so the code is
+    // highlighted while it is still arriving, not only once the block ends.
+    flushP(); if (inList) html += '</ul>'; if (inCode) flushCode();
     return html;
   }
 
-  function clearMessages() { messages.innerHTML = ''; aiEl = null; caretEl = null; }
+  function clearMessages() { messages.innerHTML = ''; aiEl = null; caretEl = null; currentGroup = null; }
 
   function addUserBubble(text) {
     const b = document.createElement('div');
@@ -77,26 +101,174 @@
     messages.appendChild(aiEl);
   }
 
+  // ---- auto-scroll -------------------------------------------------------
+  // The answer pane used to stay wherever it was while a solution streamed in
+  // below the fold, so the code you were waiting for arrived off screen. It now
+  // follows the output — until you scroll up yourself, which means you are
+  // reading something and must not be yanked back down.
+  let followOutput = true;
+  let programmaticScroll = false;
+  const FOLLOW_THRESHOLD_PX = 48;
+
+  messages.addEventListener('scroll', () => {
+    if (programmaticScroll) return;
+    followOutput = messages.scrollHeight - messages.scrollTop - messages.clientHeight < FOLLOW_THRESHOLD_PX;
+  });
+
+  function scrollToBottom() {
+    programmaticScroll = true;
+    messages.scrollTop = messages.scrollHeight;
+    requestAnimationFrame(() => { programmaticScroll = false; });
+  }
+  function followStream() { if (followOutput) scrollToBottom(); }
+
+  // ---- streaming render --------------------------------------------------
+  // Markdown is now rendered *during* the stream rather than only at the end.
+  // Before, a code block streamed in as raw text with visible ``` fences and
+  // then reflowed when it finished, which moved the code under your eyes at
+  // the exact moment you were reading it. Throttled because re-rendering the
+  // whole answer on every token is wasted work.
+  const RENDER_INTERVAL_MS = 80;
+  let renderTimer = null;
+  let lastRenderAt = 0;
+
+  function paintStreaming() {
+    if (!aiEl) return;
+    lastRenderAt = Date.now();
+    aiEl.innerHTML = renderMarkdown(aiEl.dataset.raw || '');
+    caretEl = document.createElement('span');
+    caretEl.className = 'ai-caret';
+    aiEl.appendChild(caretEl);
+    followStream();
+  }
+
+  function scheduleRender() {
+    if (renderTimer || !aiEl) return;
+    const wait = Math.max(0, RENDER_INTERVAL_MS - (Date.now() - lastRenderAt));
+    renderTimer = setTimeout(() => { renderTimer = null; paintStreaming(); }, wait);
+  }
+
   function appendToken(t) {
     if (!aiEl) startAi(false);
     aiEl.dataset.raw += t;
-    const span = document.createElement('span');
-    span.className = 'w';
-    span.textContent = t;
-    // Guard: caretEl must be a child of aiEl
-    if (caretEl && caretEl.parentNode === aiEl) {
-      aiEl.insertBefore(span, caretEl);
-    } else {
-      aiEl.appendChild(span);
-    }
+    scheduleRender();
   }
 
   function finalizeAi() {
     if (!aiEl) return;
-    const raw = aiEl.dataset.raw || '';
-    aiEl.innerHTML = renderMarkdown(raw);
+    clearTimeout(renderTimer);
+    renderTimer = null;
+    const el = aiEl;
+    el.innerHTML = renderMarkdown(el.dataset.raw || '');
+    decorateCodeBlocks(el);
     aiEl = null; caretEl = null;
+    followStream();
   }
+
+  // ---- code blocks: language label + copy --------------------------------
+  // Transcribing a solution into a shared editor by eye was the actual task
+  // this app was leaving to the user. Copy goes through the main process
+  // because the async clipboard API is unreliable on a file:// origin.
+  function decorateCodeBlocks(root) {
+    root.querySelectorAll('pre').forEach((pre) => {
+      if (pre.parentElement && pre.parentElement.classList.contains('code-block')) return;
+
+      const block = document.createElement('div');
+      block.className = 'code-block';
+      const head = document.createElement('div');
+      head.className = 'code-head';
+
+      const lang = document.createElement('span');
+      lang.className = 'code-lang';
+      lang.textContent = pre.dataset.lang || 'code';
+
+      const copy = document.createElement('button');
+      copy.className = 'code-copy';
+      copy.type = 'button';
+      copy.innerHTML = icon('copy', { size: 13 }) + '<span>Copy</span>';
+      copy.addEventListener('click', () => {
+        cue.copyText(pre.textContent || '');
+        copy.classList.add('copied');
+        copy.innerHTML = icon('check', { size: 13 }) + '<span>Copied</span>';
+        setTimeout(() => {
+          copy.classList.remove('copied');
+          copy.innerHTML = icon('copy', { size: 13 }) + '<span>Copy</span>';
+        }, 1600);
+      });
+
+      head.appendChild(lang);
+      head.appendChild(copy);
+      pre.parentNode.insertBefore(block, pre);
+      block.appendChild(head);
+      block.appendChild(pre);
+    });
+  }
+
+  // ---- answers that hit the token ceiling --------------------------------
+  // A cut-off answer looks exactly like a finished one, and the usual victim
+  // is the last third of a code block. main.js reports what the provider said
+  // about why it stopped; this makes it visible and recoverable.
+  let currentGroup = null;
+
+  function showTruncationNotice() {
+    const host = currentGroup && currentGroup.isConnected ? currentGroup : messages;
+    const note = document.createElement('div');
+    note.className = 'trunc-note';
+
+    const label = document.createElement('span');
+    label.textContent = 'This answer hit the length limit and stopped early.';
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = 'Continue';
+    button.addEventListener('click', () => {
+      button.disabled = true;
+      runMode('continue', '');
+    });
+
+    note.appendChild(label);
+    note.appendChild(button);
+    host.appendChild(note);
+    followStream();
+  }
+
+  // ---- code text size ----------------------------------------------------
+  const CODE_FONT_SIZES = [12, 13, 15, 17, 19];
+
+  function applyCodeFontSize(px) {
+    const size = Number(px) > 0 ? Number(px) : 13;
+    document.documentElement.style.setProperty('--code-fs', size + 'px');
+  }
+
+  $('#code-size-btn').addEventListener('click', () => {
+    const current = Number(settings && settings.codeFontSize) || 13;
+    const index = CODE_FONT_SIZES.indexOf(current);
+    const next = CODE_FONT_SIZES[(index + 1) % CODE_FONT_SIZES.length];
+    applyCodeFontSize(next);
+    if (settings) settings.codeFontSize = next;
+    cue.settingsSet({ codeFontSize: next });
+    showToast('Code text ' + next + 'px', 1200);
+  });
+
+  // ---- follow-up context -------------------------------------------------
+  // cue now sends the last few exchanges with each question, so a follow-up
+  // like "make it O(n)" works. This button is how you tell it to stop doing
+  // that — a new problem should not inherit the previous one.
+  function updateContextButton(exchanges) {
+    const button = $('#clear-context-btn');
+    if (!button) return;
+    const count = Number(exchanges) || 0;
+    button.classList.toggle('hidden', count === 0);
+    button.title = count === 1
+      ? 'Start fresh — 1 earlier answer is being sent as context'
+      : 'Start fresh — ' + count + ' earlier answers are being sent as context';
+  }
+
+  $('#clear-context-btn').addEventListener('click', async () => {
+    await cue.clearContext();
+    updateContextButton(0);
+    showToast('Context cleared — the next question starts fresh', 1800);
+  });
 
   let busyFailsafe = null;
   function setBusy(v) {
@@ -558,6 +730,12 @@
   }
   $('#hide-btn').addEventListener('click', toggleHide);
   cue.on('hide:toggle', toggleHide);
+  // Closed-hand cursor while the window is actually moving. main.js is the
+  // source of truth: a `-webkit-app-region: drag` element never receives the
+  // mousedown, so the renderer has no way to know a drag started.
+  cue.on('drag:state', ({ dragging } = {}) => {
+    document.documentElement.classList.toggle('window-dragging', !!dragging);
+  });
 
   // Stop = start/stop listening. Kick off system-audio capture straight from the click so
   // the user-gesture is fresh for getDisplayMedia (loopback capture needs it).
@@ -581,7 +759,10 @@
       // Save current input to history before clearing (for undo)
       saveToQuestionHistory(input.value);
       
+      // main clears the follow-up context with the transcript: the recorded
+      // turns quote it, so keeping them would answer from erased words.
       await cue.clearTranscript();
+      updateContextButton(0);
       clearMessages();
       // Also clear the floating interim bar
       if (interimEl) { interimEl.textContent = ''; interimEl.classList.remove('show'); }
@@ -1089,14 +1270,28 @@
     aiEl.appendChild(caretEl);
     group.appendChild(aiEl);
     messages.appendChild(group);
-    // Use requestAnimationFrame so the DOM is fully updated before scrolling
-    requestAnimationFrame(() => {
-      if (sep && sep.isConnected) sep.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    });
+    currentGroup = group;
+    // A new answer always follows the output again, whatever the user was
+    // reading before they asked for it.
+    followOutput = true;
+    clearTimeout(renderTimer);
+    renderTimer = null;
+    lastRenderAt = 0;
+    // Jump to the new response rather than smooth-scrolling to its header: a
+    // smooth scroll fires a stream of scroll events that read as "the user
+    // scrolled up", which would switch the follow-the-output behaviour off for
+    // the entire answer. The group is the last child, so this shows it.
+    // requestAnimationFrame so the DOM is laid out before we measure.
+    requestAnimationFrame(() => { if (sep && sep.isConnected) scrollToBottom(); });
     setBusy(true);
   });
   cue.on('llm:token', ({ text }) => appendToken(text));
-  cue.on('llm:done', () => { finalizeAi(); setBusy(false); });
+  cue.on('llm:done', ({ truncated, exchanges } = {}) => {
+    finalizeAi();
+    setBusy(false);
+    updateContextButton(exchanges);
+    if (truncated) showTruncationNotice();
+  });
   cue.on('llm:error', ({ message }) => {
     if (!aiEl) startAi(true);
     aiEl.dataset.raw = message; finalizeAi(); setBusy(false);
@@ -1271,6 +1466,7 @@
     $('#azure-endpoint').value = settings.azureEndpoint || '';
     const m = settings.models[settings.provider] || { fast: '', smart: '' };
     $('#model-fast').value = m.fast; $('#model-smart').value = m.smart;
+    updateProviderFieldHints();
     fillAppLinkCallers();
     $('#s-status').textContent = statusText();
     // Transcription tab
@@ -1367,15 +1563,82 @@
     return `${labels[settings.provider] || settings.provider} · STT: ${stt}` + (ready.length ? ' · ' + ready.join(' · ') : '');
   }
 
+  // ---- provider-scoped credential + model hints ---------------------------
+  // Filled from main so the placeholder is the model cue would really fall back
+  // to, not a copy that drifts. Empty until the first settings open.
+  let providerDefaults = {};
+
+  const PROVIDER_LABELS = {
+    openai: 'OpenAI', anthropic: 'Anthropic', gemini: 'Gemini', custom: 'Custom',
+    ollama: 'Ollama', groq: 'Groq', minimax: 'MiniMax', azure: 'Azure AI Foundry'
+  };
+  const providerLabel = (id) => PROVIDER_LABELS[id] || id;
+
+  // Ollama holds a URL rather than a secret, and its field has a working
+  // default, so it is never "missing".
+  const needsKey = (provider) => provider !== 'ollama';
+
+  function credentialFor(provider) {
+    const keys = (settings && settings.apiKeys) || {};
+    if (provider === 'ollama') return keys.ollama || 'http://localhost:11434';
+    return keys[provider] || '';
+  }
+
+  /**
+   * Point the key list at the row the selected provider actually reads, and
+   * flag it when it is empty — the single most common reason cue answers
+   * nothing at all.
+   */
+  function updateProviderFieldHints() {
+    if (!settings) return;
+    const provider = settings.provider;
+    const label = providerLabel(provider);
+    const missing = needsKey(provider) && !credentialFor(provider).trim();
+
+    document.querySelectorAll('#settings [data-key-for]').forEach((row) => {
+      const isActive = row.dataset.keyFor === provider;
+      row.classList.toggle('is-active', isActive);
+      row.classList.toggle('is-missing', isActive && missing);
+    });
+
+    const help = $('#active-key-help');
+    help.classList.toggle('is-missing', missing);
+    help.textContent = missing
+      ? `${label} is selected but its key is empty — fill the highlighted field below.`
+      : `${label} is selected, so cue uses the highlighted key below.`;
+
+    $('#model-provider-name').textContent = label;
+
+    const fallback = providerDefaults[provider] || '';
+    const fastEl = $('#model-fast');
+    const smartEl = $('#model-smart');
+    fastEl.placeholder = fallback;
+    smartEl.placeholder = fallback;
+    $('#model-help').textContent = fallback
+      ? `Leave empty to use cue's default for ${label} (${fallback}).`
+      : `Enter the model id exactly as ${label} publishes it.`;
+  }
+
   document.querySelectorAll('#provider-seg button').forEach((b) => b.addEventListener('click', () => {
     settings.provider = b.dataset.provider;
     document.querySelectorAll('#provider-seg button').forEach((x) => x.classList.toggle('on', x === b));
     updateCustomProviderFields();
     const m = settings.models[settings.provider] || { fast: '', smart: '' };
     $('#model-fast').value = m.fast; $('#model-smart').value = m.smart;
+    updateProviderFieldHints();
     $('#s-status').textContent = statusText();
     updateSmartTooltip();
   }));
+
+  // Typing a key clears the "missing" warning as soon as it is no longer true.
+  document.querySelectorAll('#settings [data-key-for] input').forEach((input) => {
+    input.addEventListener('input', () => {
+      const row = input.closest('[data-key-for]');
+      if (!settings || !row || row.dataset.keyFor !== settings.provider) return;
+      settings.apiKeys[row.dataset.keyFor] = input.value.trim();
+      updateProviderFieldHints();
+    });
+  });
   document.querySelectorAll('#minimax-region-seg button').forEach((b) => b.addEventListener('click', () => {
     settings.minimaxRegion = b.dataset.region;
     document.querySelectorAll('#minimax-region-seg button').forEach((x) => x.classList.toggle('on', x === b));
@@ -1593,10 +1856,76 @@
     if ((e.metaKey || e.ctrlKey) && e.key === ',') { e.preventDefault(); openSettings(); }
   });
 
+  // ---- window resize grip -------------------------------------------------
+  // An overlay cannot use the window's native resize edges: the renderer turns
+  // every empty pixel click-through, and the edges *are* empty pixels. So the
+  // size is dragged from the one corner the user can actually see.
+  let resizing = false;
+
+  (function wireResizeGrip() {
+    const grip = $('#resize-grip');
+    let origin = null;
+    let queued = null;
+    let frame = null;
+
+    // One resize per frame: a pointer produces far more events than the window
+    // can usefully be resized, and each one is an IPC round trip plus a native
+    // setSize.
+    const flush = () => {
+      frame = null;
+      if (!queued) return;
+      cue.resizeWindow(queued);
+      queued = null;
+    };
+
+    const end = () => {
+      if (!origin) return;
+      try { grip.releasePointerCapture(origin.pointerId); } catch (_) { /* already released */ }
+      origin = null;
+      resizing = false;
+      document.documentElement.classList.remove('window-resizing');
+    };
+
+    grip.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      origin = {
+        pointerId: e.pointerId,
+        x: e.screenX, y: e.screenY,
+        width: window.innerWidth, height: window.innerHeight
+      };
+      resizing = true;
+      document.documentElement.classList.add('window-resizing');
+      // Capture keeps the gesture alive when the pointer outruns the window edge.
+      try { grip.setPointerCapture(e.pointerId); } catch (_) { /* capture is best effort */ }
+    });
+
+    grip.addEventListener('pointermove', (e) => {
+      if (!origin || e.pointerId !== origin.pointerId) return;
+      // Screen coordinates, not client: the window is moving under the pointer,
+      // so client coordinates would chase their own tail.
+      queued = {
+        width: origin.width + (e.screenX - origin.x),
+        height: origin.height + (e.screenY - origin.y)
+      };
+      if (!frame) frame = requestAnimationFrame(flush);
+    });
+
+    grip.addEventListener('pointerup', end);
+    grip.addEventListener('pointercancel', end);
+    // A lost window is a lost gesture — otherwise `resizing` stays true and the
+    // click-through toggle never comes back.
+    window.addEventListener('blur', end);
+  })();
+
   // ---- click-through: only the UI blocks the mouse; empty gaps pass to your screen ----
   let ignoring = null;
   function setIgnore(v) { if (v !== ignoring) { ignoring = v; cue.setIgnoreMouse(v); } }
   document.addEventListener('mousemove', (e) => {
+    // While resizing, the pointer routinely runs ahead of the window edge and
+    // ends up over empty space. Handing the mouse back to the desktop there
+    // would drop the gesture mid-drag, so the toggle is frozen until it ends.
+    if (resizing) return;
     const el = document.elementFromPoint(e.clientX, e.clientY);
     const overUI = !!(el && el.closest && el.closest('#toolbar, #panel-wrap, #transcript-sidebar, #settings-scrim, #onboard-scrim, #consent-scrim'));
     setIgnore(!overUI);
@@ -1656,6 +1985,7 @@
       ];
   const assistShortcut = isWindows ? '<span class="kbd">Ctrl</span> <span class="kbd">↵</span>' : '<span class="kbd">⌘</span> <span class="kbd">↵</span>';
   const solveShortcut = isWindows ? '<span class="kbd">Ctrl</span> <span class="kbd">H</span>' : '<span class="kbd">⌘</span> <span class="kbd">H</span>';
+  const refactorShortcut = isWindows ? '<span class="kbd">Ctrl</span> <span class="kbd">R</span>' : '<span class="kbd">⌘</span> <span class="kbd">R</span>';
   const quitShortcut = isWindows ? '<span class="kbd">Ctrl</span><span class="kbd">⇧</span><span class="kbd">X</span>' : '<span class="kbd">⌘</span><span class="kbd">⇧</span><span class="kbd">X</span>';
   const OB_STEPS = [
     {
@@ -1683,7 +2013,7 @@
     {
       icon: '✨',
       title: 'You’re all set',
-      body: 'How to use cue:<ul><li>' + assistShortcut + ' — <strong>Assist</strong> with whatever\'s on screen or being said</li><li>' + solveShortcut + ' — solve a coding problem on screen</li><li>Click <strong>▢</strong> in the top bar to start listening to a meeting</li><li>Type a question and press <span class="kbd">↵</span></li></ul>Reopen this guide anytime by clicking the <strong>cue logo</strong>. Quit with ' + quitShortcut + '.'
+      body: 'How to use cue:<ul><li>' + assistShortcut + ' — <strong>Assist</strong> with whatever\'s on screen or being said</li><li>' + solveShortcut + ' — solve a coding problem on screen</li><li>' + refactorShortcut + ' — <strong>refactor</strong> the code on screen</li><li>Click <strong>▢</strong> in the top bar to start listening to a meeting</li><li>Type a question and press <span class="kbd">↵</span></li></ul>Reopen this guide anytime by clicking the <strong>cue logo</strong>. Quit with ' + quitShortcut + '.<br><br><em>Heads up:</em> while cue runs it owns ' + refactorShortcut + ' system-wide, so that key will not reload a browser page.'
     }
   ];
   let obIndex = 0;
@@ -1718,8 +2048,17 @@
     // R4: shortcut hints
     const sayHintEl = document.getElementById('say-shortcut-hint');
     const assistHintEl = document.getElementById('assist-shortcut-hint');
+    const solveHintEl = document.getElementById('solve-shortcut-hint');
+    const refactorHintEl = document.getElementById('refactor-shortcut-hint');
     if (sayHintEl) sayHintEl.textContent = isWindows ? 'Ctrl+Shift+↵' : '⌘⇧↵';
     if (assistHintEl) assistHintEl.textContent = isWindows ? 'Ctrl+↵' : '⌘↵';
+    if (solveHintEl) solveHintEl.textContent = isWindows ? 'Ctrl+H' : '⌘H';
+    if (refactorHintEl) refactorHintEl.textContent = isWindows ? 'Ctrl+R' : '⌘R';
+
+    applyCodeFontSize(settings.codeFontSize);
+    // Real fallbacks from src/llm.js, so the model placeholders cannot drift
+    // from what cue would actually send.
+    providerDefaults = await cue.providerDefaults().catch(() => ({}));
 
     // R5: prep status
     updatePrepStatus();

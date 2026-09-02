@@ -10,7 +10,9 @@ cue is bring-your-own-key. A provider is "done" only when all five touchpoints a
 ## Chat / LLM provider
 
 1. **`src/llm.js`**
-   - Write `streamX({ apiKey, baseURL, model, system, turns, imageDataUrl, maxTokens, onToken })` → returns the full text, calls `onToken(delta)` per chunk.
+   - Write `streamX({ apiKey, baseURL, model, system, turns, imageDataUrl, maxTokens, onToken, onTruncated })` → returns the full text, calls `onToken(delta)` per chunk.
+   - **`onTruncated` is not optional to implement.** Every provider spells "I stopped because I ran out of room" differently (`finish_reason: 'length'`, `stop_reason: 'max_tokens'`, `finishReason: 'MAX_TOKENS'`, `done_reason: 'length'`), and a cut-off answer is indistinguishable from a finished one without it — the usual victim is the last third of a code block. Find the provider's signal and call `onTruncated()` once.
+   - `turns` can hold several exchanges now, not one user turn: providers that require strict user/assistant alternation get it, but don't reorder or merge them.
    - If the API is OpenAI-compatible, do **not** write a new function — route through `streamOpenAI` with a `baseURL` (see how `groq` and `minimax` do it in the `stream()` switch).
    - Add the id to `DEFAULT_MODELS`.
    - Add a `PROVIDER_LABELS` entry if the display name isn't just capitalised.

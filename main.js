@@ -1,16 +1,18 @@
-const { app, BrowserWindow, ipcMain, globalShortcut, screen, session, desktopCapturer, shell, dialog, systemPreferences } = require('electron');
+const { app, BrowserWindow, ipcMain, globalShortcut, screen, session, desktopCapturer, shell, dialog, systemPreferences, clipboard } = require('electron');
 const path = require('path');
 const os = require('os');
 const store = require('./src/store');
 const { captureScreenshot } = require('./src/screen');
 const { createSTT } = require('./src/stt');
 const { parseDocumentFile } = require('./src/resume');
-const { createLLM } = require('./src/llm');
-const { MODES } = require('./src/prompts');
+const { createLLM, DEFAULT_MODELS } = require('./src/llm');
+const { MODES, CODE_MODES } = require('./src/prompts');
 const { rms16 } = require('./src/wav');
 const { createStreamingSTT } = require('./src/stt-streaming');
 const { AdaptiveVAD, AudioRingBuffer } = require('./src/vad');
 const { buildInterviewContext, detectCategory } = require('./src/interview-context');
+const { ConversationMemory } = require('./src/conversation');
+const { clampWindowSize, MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT } = require('./src/window-geometry');
 const { startAppLink, stopAppLink, recordEvent, appLinkConsentState, revokeAppLinkCaller } = require('./src/applink');
 
 // macOS system-audio loopback (the "them" channel via getDisplayMedia) does not
@@ -31,7 +33,7 @@ let win = null;
 // false when another application already owns the combination, and nothing used
 // to look at that — so the only symptom was a key that did nothing. Iris reads
 // this and can say which key is taken instead of guessing from a screenshot.
-const shortcutState = { assist: false, say: false, leetcode: false, quit: false };
+const shortcutState = { assist: false, say: false, leetcode: false, refactor: false, quit: false };
 const isMac = process.platform === 'darwin';
 const isWindows = process.platform === 'win32';
 
@@ -53,6 +55,12 @@ const state = { capturing: false, busy: false, transcribing: { you: false, them:
 let sttDisabled = false; // set when the key can't reach any speech model (stops retry spam)
 const buffers = { you: [], them: [] };
 const transcript = []; // { channel, text, ts } — capped at MAX_TRANSCRIPT_TURNS
+// What the model already said this session, so "now make it O(n)" has something
+// to refer to. Scoped so coding help and interview help never mix — see src/conversation.js.
+const conversation = new ConversationMemory();
+// The last mode that actually produced an answer. `continue` borrows its system
+// prompt, so a resumed LeetCode solution stays under the LeetCode rules.
+let lastAnsweredMode = null;
 const MAX_TRANSCRIPT_TURNS = 200; // ~30–40 minutes of conversation at normal pace
 const FLUSH_MS = 900;
 const STREAM_INACTIVITY_MS = 25000; // abort a stalled LLM stream so state.busy can't wedge forever
@@ -185,25 +193,36 @@ function createWindow() {
   const W = 700, H = 600;
 
   const savedSettings = store.getSettings();
-  let startX = Math.round(workArea.x + (workArea.width - W) / 2);
+  // Size is restored as well as position. Reading a full solution needs a
+  // taller panel than the default, and re-dragging the corner every session
+  // was pure friction. Clamped to the work area so a display change — an
+  // unplugged external monitor — can't restore a window bigger than the screen.
+  const width = Math.min(Math.max(savedSettings.windowW || W, 380), workArea.width);
+  const height = Math.min(Math.max(savedSettings.windowH || H, 260), workArea.height);
+
+  let startX = Math.round(workArea.x + (workArea.width - width) / 2);
   let startY = workArea.y + 6;
 
   if (savedSettings.windowX !== null && savedSettings.windowY !== null) {
-    const clampedX = Math.max(workArea.x - W + 100, Math.min(savedSettings.windowX, workArea.x + workArea.width - 100));
+    const clampedX = Math.max(workArea.x - width + 100, Math.min(savedSettings.windowX, workArea.x + workArea.width - 100));
     const clampedY = Math.max(workArea.y, Math.min(savedSettings.windowY, workArea.y + workArea.height - 40));
     startX = clampedX;
     startY = clampedY;
   }
 
   const winOptions = {
-    width: W,
-    height: H,
+    width,
+    height,
     x: startX,
     y: startY,
     frame: false,
     transparent: true,
     hasShadow: false,
     resizable: true,
+    // The renderer's grip enforces these too, but a native floor means no code
+    // path can leave the window smaller than its own controls.
+    minWidth: MIN_WINDOW_WIDTH,
+    minHeight: MIN_WINDOW_HEIGHT,
     skipTaskbar: true,
     alwaysOnTop: true,
     fullscreenable: false,
@@ -243,15 +262,45 @@ function createWindow() {
 
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 
-  let moveSaveTimer = null;
-  win.on('moved', () => {
-    clearTimeout(moveSaveTimer);
-    moveSaveTimer = setTimeout(() => {
+  let boundsSaveTimer = null;
+  const saveBounds = () => {
+    clearTimeout(boundsSaveTimer);
+    boundsSaveTimer = setTimeout(() => {
       if (win && !win.isDestroyed()) {
-        const [x, y] = win.getPosition();
-        store.setSettings({ windowX: x, windowY: y });
+        const bounds = win.getBounds();
+        store.setSettings({ windowX: bounds.x, windowY: bounds.y, windowW: bounds.width, windowH: bounds.height });
       }
     }, 500);
+  };
+  win.on('moved', saveBounds);
+  // 'resized' is macOS/Windows only; 'resize' covers Linux. The debounce
+  // collapses the double-fire on the platforms that emit both.
+  win.on('resized', saveBounds);
+  win.on('resize', saveBounds);
+
+  // Cursor feedback while the window is being dragged by its pill.
+  //
+  // The renderer cannot detect this itself: an element with
+  // `-webkit-app-region: drag` is handled by the OS and never receives the
+  // mousedown, so `:active` never matches and no JS event fires. The move
+  // events are the only signal that a drag is in progress.
+  let dragIdleTimer = null;
+  let dragging = false;
+  const setDragging = (active) => {
+    if (dragging === active) return;
+    dragging = active;
+    send('drag:state', { dragging: active });
+  };
+  win.on('move', () => {
+    setDragging(true);
+    // 'moved' is the reliable end signal on macOS/Windows, but it does not
+    // exist everywhere — so a short idle timeout also releases the state.
+    clearTimeout(dragIdleTimer);
+    dragIdleTimer = setTimeout(() => setDragging(false), 200);
+  });
+  win.on('moved', () => {
+    clearTimeout(dragIdleTimer);
+    setDragging(false);
   });
 
   win.setTitle('Microsoft Edge Update'); // set before load
@@ -496,7 +545,7 @@ async function runFeature(mode, userText) {
     const userBubble = def.userBubble !== null
       ? def.userBubble
       : (mode === 'ask' ? userText : mode === 'answerThis' ? `"${(userText || '').slice(0, 60)}${userText && userText.length > 60 ? '…' : ''}"` : null);
-    const category = mode !== 'leetcode' ? detectCategory(transcript) : null;
+    const category = CODE_MODES.has(mode) ? null : detectCategory(transcript);
     send('llm:start', { userBubble, small: !!def.small, category });
 
     if (!llm.ready) {
@@ -523,9 +572,15 @@ async function runFeature(mode, userText) {
     }
 
     const settingsForPrompt = store.getSettings();
-    const contextBlock = buildInterviewContext(settingsForPrompt, mode, transcript);
-    const system = def.buildSystem ? def.buildSystem(contextBlock, settingsForPrompt.aiRules || '') : (def.system || '');
+    // `continue` has no voice of its own: it resumes the answer that was cut
+    // off, so it runs under the prompt — and the context rules — of whatever
+    // mode produced that answer.
+    const systemMode = (def.inheritSystemFromLastMode && MODES[lastAnsweredMode]) ? lastAnsweredMode : mode;
+    const systemDef = MODES[systemMode];
+    const contextBlock = buildInterviewContext(settingsForPrompt, systemMode, transcript);
+    const system = systemDef.buildSystem ? systemDef.buildSystem(contextBlock, settingsForPrompt.aiRules || '') : (systemDef.system || '');
     const built = def.build({ transcript, userText: userText || '' });
+    const priorTurns = conversation.enter(def.memoryScope || 'interview');
 
     // Watchdog: a provider that stalls mid-stream would otherwise hang the await forever,
     // leaving state.busy = true and wedging every later question until an app restart.
@@ -538,21 +593,35 @@ async function runFeature(mode, userText) {
       };
       rearm();
     });
+    // A provider that stops on its token ceiling returns a half-written answer
+    // that looks exactly like a finished one — the worst case being a code
+    // block cut off mid-line during a live exercise. The UI offers "Continue".
+    let truncated = false;
+    const streamParams = {
+      system,
+      turns: [...priorTurns, { role: 'user', text: built }],
+      imageDataUrl,
+      onToken: (t) => { if (streamSettled) return; rearm(); send('llm:token', { text: t }); },
+      onTruncated: () => { truncated = true; }
+    };
+    // Modes that need room for a whole program say so; everything else keeps
+    // the conversational default from the provider tier.
+    if (def.maxTokens) {
+      streamParams.maxTokens = settingsForPrompt.smart ? def.maxTokens.smart : def.maxTokens.fast;
+    }
+
+    let answer = '';
     try {
-      await Promise.race([
-        llm.stream({
-          system,
-          turns: [{ role: 'user', text: built }],
-          imageDataUrl,
-          onToken: (t) => { if (streamSettled) return; rearm(); send('llm:token', { text: t }); }
-        }),
-        stalled
-      ]);
+      answer = await Promise.race([llm.stream(streamParams), stalled]);
     } finally {
       streamSettled = true;
       clearTimeout(watchdog);
     }
-    send('llm:done', {});
+    // Recorded only on success, and only as a complete pair, so the turn list
+    // stays strictly alternating for providers that require it.
+    conversation.record(built, answer);
+    lastAnsweredMode = systemMode;
+    send('llm:done', { truncated, exchanges: conversation.exchanges });
   } catch (e) {
     recordEvent({ level: 'error', event: 'llm_failed', msg: e && e.message ? e.message : String(e), frame: 'runFeature', context: { mode, provider: store.getSettings().provider } });
     send('llm:error', { message: e && e.message ? e.message : String(e) });
@@ -613,6 +682,10 @@ ipcMain.handle('whisper:model-import', async (_event, modelId) => {
   send('whisper:models-changed', { modelId });
   return result;
 });
+// The model cue falls back to per provider. Sent to the renderer so the model
+// fields can show the real default as a placeholder instead of a blank box —
+// an empty field means "use this", not "broken".
+ipcMain.handle('provider:defaults', () => DEFAULT_MODELS);
 ipcMain.handle('platform:info', () => ({
   platform: process.platform,
   winBuild: WIN_BUILD,
@@ -620,12 +693,45 @@ ipcMain.handle('platform:info', () => ({
 }));
 ipcMain.handle('transcript:clear', () => {
   transcript.splice(0, transcript.length);
+  // Clearing the conversation too: the recorded turns quote the transcript, so
+  // leaving them behind would keep answering from words the user just erased.
+  conversation.clear();
+  lastAnsweredMode = null;
   return { ok: true };
+});
+// "Start fresh" — drops the follow-up context without touching the transcript.
+ipcMain.handle('context:clear', () => {
+  conversation.clear();
+  lastAnsweredMode = null;
+  return { ok: true, exchanges: conversation.exchanges };
+});
+// The renderer runs on file:// where the async clipboard API is unreliable, and
+// copying a solution has to work on the first click. Length-capped because the
+// argument comes from the renderer.
+const MAX_CLIPBOARD_CHARS = 100000;
+ipcMain.on('clipboard:write', (_e, text) => {
+  const value = typeof text === 'string' ? text : String(text == null ? '' : text);
+  if (!value) return;
+  clipboard.writeText(value.slice(0, MAX_CLIPBOARD_CHARS));
 });
 ipcMain.on('ask', (_e, payload) => runFeature(payload.mode, payload.text));
 ipcMain.on('mic:pcm', (_e, arrayBuffer) => { if (state.capturing) routeAudio('you', arrayBuffer); });
 ipcMain.on('system:pcm', (_e, arrayBuffer) => { if (state.capturing) routeAudio('them', arrayBuffer); });
 ipcMain.on('mouse:ignore', (_e, v) => { if (win) win.setIgnoreMouseEvents(!!v, { forward: true }); });
+// Resize driven by the panel's grip.
+//
+// The window's own resize edges are unreachable in an overlay: the renderer
+// makes every empty pixel click-through, and those empty pixels are exactly
+// where the edges are. So the grip does the work, and this clamps whatever
+// pointer arithmetic it sends.
+ipcMain.on('window:resize', (_e, size) => {
+  if (!win || win.isDestroyed()) return;
+  const bounds = win.getBounds();
+  const { workArea } = screen.getDisplayMatching(bounds);
+  const next = clampWindowSize(size, workArea, { width: bounds.width, height: bounds.height });
+  if (next.width === bounds.width && next.height === bounds.height) return;
+  win.setSize(next.width, next.height);
+});
 ipcMain.on('open-pane', (_e, url) => { shell.openExternal(url).catch(() => {}); });
 ipcMain.on('app:quit', () => app.quit());
 ipcMain.on('log', (_e, msg) => console.log('[renderer]', msg));
@@ -672,6 +778,9 @@ function registerShortcuts() {
   shortcutState.assist = globalShortcut.register('CommandOrControl+Return', () => runFeature('assist', ''));
   shortcutState.say = globalShortcut.register('CommandOrControl+Shift+Return', () => runFeature('say', ''));
   shortcutState.leetcode = globalShortcut.register('CommandOrControl+H', () => runFeature('leetcode', ''));
+  // Note: this is a *global* shortcut, so while cue is running it takes
+  // Cmd/Ctrl+R away from every other app — browser reload included.
+  shortcutState.refactor = globalShortcut.register('CommandOrControl+R', () => runFeature('refactor', ''));
   shortcutState.hide = globalShortcut.register('CommandOrControl+Shift+/', () => send('hide:toggle', {}));
   shortcutState.quit = globalShortcut.register('CommandOrControl+Shift+X', () => app.quit());
   for (const [name, wasRegistered] of Object.entries(shortcutState)) {
