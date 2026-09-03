@@ -384,3 +384,29 @@ test('an optional credential row is never painted as a missing one', () => {
     'the missing highlight must skip optional rows'
   );
 });
+
+test('hide/show has a shortcut, and it is not the macOS Help key', () => {
+  // The binding existed all along on CommandOrControl+Shift+/ — which on macOS
+  // is how ⌘? (Help) is typed, so it fought the OS for the key on the platform
+  // it mattered on, and nothing in the UI announced it either way.
+  const mainSource = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
+  assert.match(mainSource, /HIDE_ACCELERATOR = 'CommandOrControl\+Alt\+Down'/);
+  assert.match(mainSource, /shortcutState\.hide = globalShortcut\.register\(HIDE_ACCELERATOR/);
+  assert.ok(!mainSource.includes("register('CommandOrControl+Shift+/'"), 'the Help-key binding is back');
+});
+
+test('the Hide button advertises the shortcut and says which way it goes', () => {
+  // The feature was unused because nothing named the key. The toolbar has no
+  // room for a visible hint, so it goes in the tooltip like its neighbours.
+  assert.match(rendererSource, /HIDE_KEYS = isMac \? '⌘⌥↓' : 'Ctrl\+Alt\+↓'/);
+  assert.match(rendererSource, /#hide-btn'\)\.title = 'Hide the panel \(' \+ HIDE_KEYS/);
+  // While collapsed the panel that would have explained the button is gone, so
+  // the label has to flip.
+  assert.match(rendererSource, /collapsed \? 'Show' : 'Hide'/);
+});
+
+test('toolbar tooltips name keys the running platform actually has', () => {
+  // Quit's tooltip was hardcoded to the mac combination in the markup.
+  assert.ok(!/id="quit-btn"[^>]*title="Quit cue \(⌘⇧X\)"/.test(markup), 'the mac-only tooltip is back in the markup');
+  assert.match(rendererSource, /Quit cue \(' \+ \(isMac \? '⌘⇧X' : 'Ctrl\+Shift\+X'\)/);
+});

@@ -6,6 +6,9 @@
   const $ = (s) => document.querySelector(s);
   const isWindows = cue.platform === 'win32';
   const isMac = cue.platform === 'darwin';
+  // Declared up here rather than beside the other key labels: toggleHide reads
+  // it, and that runs long before the capture strip's block is reached.
+  const HIDE_KEYS = isMac ? '⌘⌥↓' : 'Ctrl+Alt+↓';
 
   // ---- paint icons -------------------------------------------------------
   $('#logo-btn').innerHTML = icon('logo', { size: 18 });
@@ -804,6 +807,10 @@
     $('#panel-wrap').classList.toggle('collapsed', collapsed);
     $('#hide-btn').classList.toggle('collapsed', collapsed);
     $('#live-dot').style.display = collapsed ? 'none' : '';
+    // The label is the only thing on screen that says which way the button goes,
+    // and while collapsed the panel that would have explained it is gone.
+    $('#hide-btn').querySelector('span:last-child').textContent = collapsed ? 'Show' : 'Hide';
+    $('#hide-btn').title = (collapsed ? 'Show the panel (' : 'Hide the panel (') + HIDE_KEYS + ')';
   }
   $('#hide-btn').addEventListener('click', toggleHide);
   cue.on('hide:toggle', toggleHide);
@@ -2134,6 +2141,12 @@
     const refactorHintEl = document.getElementById('refactor-shortcut-hint');
     const captureHintEl = document.getElementById('capture-shortcut-hint');
     if (captureHintEl) captureHintEl.textContent = CAPTURE_KEYS;
+    // The toolbar has no room for a visible hint, so Hide advertises its key the
+    // way the other toolbar buttons do — in the tooltip.
+    $('#hide-btn').title = 'Hide the panel (' + HIDE_KEYS + ')';
+    // Quit's tooltip was hardcoded to the mac keys in the markup, so Windows was
+    // shown a combination its keyboard does not have.
+    $('#quit-btn').title = 'Quit cue (' + (isMac ? '⌘⇧X' : 'Ctrl+Shift+X') + ')';
     if (sayHintEl) sayHintEl.textContent = isWindows ? 'Ctrl+Shift+↵' : '⌘⇧↵';
     if (assistHintEl) assistHintEl.textContent = isWindows ? 'Ctrl+↵' : '⌘↵';
     if (solveHintEl) solveHintEl.textContent = isWindows ? 'Ctrl+H' : '⌘H';

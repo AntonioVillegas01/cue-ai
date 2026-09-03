@@ -542,6 +542,13 @@ async function setCapturing(active) {
 // for the answer once. See src/capture-session.js for the staging rules and
 // src/prompts.js `scrollNote` for how the overlap is reconciled.
 
+// Show/hide the panel. Shares the ⌘⌥ family with the capture keys, and uses the
+// down arrow because the gesture has a direction: the panel drops away and comes
+// back, and the Hide button's chevron already points the same way.
+//
+// Note for anyone changing this: it is a *global* shortcut, so while cue runs it
+// takes ⌥⌘↓ away from every other app — VS Code's "Add Cursor Below" among them.
+const HIDE_ACCELERATOR = 'CommandOrControl+Alt+Down';
 const CAPTURE_ACCELERATOR = 'CommandOrControl+Alt+C';
 // What a staged session can be turned into. Both run an ordinary mode against
 // the captures — `runFeature` already prefers the session over a fresh grab —
@@ -902,7 +909,13 @@ function registerShortcuts() {
   shortcutState.solveCaptures = globalShortcut.register(SOLVE_CAPTURES_ACCELERATOR, () => runFeature('leetcode', ''));
   shortcutState.testCaptures = globalShortcut.register(TEST_CAPTURES_ACCELERATOR, () => runFeature('tests', ''));
   shortcutState.refactorCaptures = globalShortcut.register(REFACTOR_CAPTURES_ACCELERATOR, () => runFeature('refactor', ''));
-  shortcutState.hide = globalShortcut.register('CommandOrControl+Shift+/', () => send('hide:toggle', {}));
+  // Collapse the panel to the toolbar and back. This was CommandOrControl+Shift+/
+  // — which on macOS is the system Help shortcut (⌘⇧/ is how ⌘? is typed), so it
+  // was fighting the OS for the key on the one platform it mattered on. It also
+  // sat in no obvious family, and nothing in the UI announced it, so the feature
+  // existed and went unused. ⌘⌥A joins the ⌘⌥ family the capture keys already
+  // established, and the Hide button now carries the hint.
+  shortcutState.hide = globalShortcut.register(HIDE_ACCELERATOR, () => send('hide:toggle', {}));
   shortcutState.quit = globalShortcut.register('CommandOrControl+Shift+X', () => app.quit());
   for (const [name, wasRegistered] of Object.entries(shortcutState)) {
     if (!wasRegistered) {

@@ -173,7 +173,7 @@ cue is hidden from most screen-share tools automatically — **Google Meet, Micr
 - **The `▢` button** (top bar) — start/stop **listening** to a meeting. The green dot means it's live.
 - **Type a question** in the box and press `↵` to ask about your screen or conversation.
 - **Smart** — flip it on for a smarter, more thorough model; off for fast and cheap.
-- **Hide** collapses the panel to just the top bar. Drag cue around by the **top pill**. Quit with `⌘` `⇧` `X` on macOS or `Ctrl` `Shift` `X` on Windows.
+- **`⌘` `⌥` `↓` — Hide / show the panel.** Collapses it to just the top bar and brings it back, without reaching for the mouse. The **Hide** button in the top bar does the same. Drag cue around by the **top pill**. Quit with `⌘` `⇧` `X` on macOS or `Ctrl` `Shift` `X` on Windows.
 
 The panel is see-through and click-through — the empty space around it never blocks the app behind it.
 
